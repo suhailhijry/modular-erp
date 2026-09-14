@@ -255,7 +255,13 @@ impl ControlPlane {
 
         // Time-ordered, like every other id this system mints: a v4 in a
         // primary key scatters writes across the index.
+        //
+        // The authenticator, the key and the record of its issue commit
+        // together. The identity and its membership above are each their own
+        // act with their own entry; a key whose issue then fails leaves an
+        // identity with nothing to sign in as, which is inert.
         let authenticator = uuid::Uuid::now_v7();
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "INSERT INTO authenticator (id, identity_id, kind, handle, secret)
              VALUES ($1, $2, 'api_key', $3, $4)",
@@ -264,7 +270,7 @@ impl ControlPlane {
             public_key,
             hex::encode(sha2::Sha256::digest(secret_half.as_bytes())),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         let id = uuid::Uuid::now_v7();
@@ -284,10 +290,11 @@ impl ControlPlane {
             actor.identity.as_ref().map(IdentityId::as_uuid),
             replacing,
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
         self.record(
+            &mut tx,
             actor,
             Some(tenant),
             "api_key.issued",
@@ -301,6 +308,7 @@ impl ControlPlane {
             }),
         )
         .await?;
+        tx.commit().await?;
 
         Ok((
             ApiKey {
@@ -466,6 +474,7 @@ impl ControlPlane {
         why: &str,
         actor: Actor,
     ) -> Result<bool, AccessError> {
+        let mut tx = self.pool.begin().await?;
         let changed = sqlx::query!(
             "UPDATE api_key SET revoked_at = now(), revoked_why = $3
               WHERE id = $1 AND tenant_id = $2 AND revoked_at IS NULL",
@@ -473,12 +482,13 @@ impl ControlPlane {
             tenant.as_uuid(),
             why.trim(),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
 
         if changed > 0 {
             self.record(
+                &mut tx,
                 actor,
                 Some(tenant),
                 "api_key.revoked",
@@ -488,6 +498,7 @@ impl ControlPlane {
             )
             .await?;
         }
+        tx.commit().await?;
         Ok(changed > 0)
     }
 
@@ -528,6 +539,7 @@ impl ControlPlane {
             .await?;
 
         let seconds = i64::try_from(overlap.as_secs()).unwrap_or(i64::MAX);
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "UPDATE api_key
                 SET expires_at = now() + ($2::BIGINT * INTERVAL '1 second')
@@ -535,10 +547,11 @@ impl ControlPlane {
             key,
             seconds,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         self.record(
+            &mut tx,
             actor,
             Some(tenant),
             "api_key.rotated",
@@ -547,6 +560,7 @@ impl ControlPlane {
             serde_json::json!({ "into": issued.0.id.to_string(), "overlap_seconds": seconds }),
         )
         .await?;
+        tx.commit().await?;
 
         Ok(Some(issued))
     }

@@ -38964,7 +38964,7 @@
                 }
               }
             },
-            "description": "Not suspended. `tenants.wrong_status` names what it is"
+            "description": "Neither suspended nor being suspended. `tenants.wrong_status` names what it is"
           },
           "500": {
             "content": {
@@ -38977,7 +38977,7 @@
             "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
           }
         },
-        "summary": "Lift a tenant's suspension. It is usable again from the next request, and\nits background jobs catch up at their next visit.",
+        "summary": "Lift a tenant's suspension, finished or still draining. It is usable again\nfrom the next request, and its background jobs catch up at their next\nvisit.",
         "tags": [
           "platform"
         ]
@@ -38999,7 +38999,7 @@
         }
       ],
       "post": {
-        "description": "From the next request its members, its API keys and its public pages are\nall answered `503 access.tenant_unavailable` — the one message, whoever\nasks — everywhere but its audit trail, `GET /v1/audit`, which the owner (or\na key scoped `*:manage_tenant`) can still read. Its background jobs stop, a visit already under way before its next\njob. Nobody is signed out: members may work for other tenants too. Support\ncan still open it.\n\n**Write the reason for the tenant's owner.** It is recorded, under your\nname, in the audit trail about their tenant, and they read it there —\n`GET /v1/audit` answers them while every other route is `503` — so it is no\nplace for internal notes.",
+        "description": "From the next request its members, its API keys and its public pages are\nall answered `503 access.tenant_unavailable` — the one message, whoever\nasks — everywhere but its audit trail, `GET /v1/audit`, which the owner (or\na key scoped `*:manage_tenant`) can still read. Every background job but\nthe two that sign and report to ZATCA stops at once; those two keep\nrunning until nothing is left for them — a simplified invoice has 24 hours\nto be reported, and a suspension must not be what makes it late — and the\nworker then records `tenant.suspension_complete` and stops visiting.\nNobody is signed out: members may work for other tenants too. Support can\nstill open it.\n\n**Write the reason for the tenant's owner.** It is recorded, under your\nname, in the audit trail about their tenant, and they read it there —\n`GET /v1/audit` answers them while every other route is `503` — so it is no\nplace for internal notes.",
         "operationId": "suspend_tenant",
         "parameters": [
           {
@@ -39075,7 +39075,7 @@
                 }
               }
             },
-            "description": "Not active — already suspended, or still provisioning. `tenants.wrong_status` names what it is"
+            "description": "Not active — already suspended or still draining, or still provisioning. `tenants.wrong_status` names what it is"
           },
           "413": {
             "content": {
@@ -39118,7 +39118,7 @@
             "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
           }
         },
-        "summary": "Suspend a tenant: nothing runs for it until it is reinstated.",
+        "summary": "Suspend a tenant: its doors shut now, its issued documents are still\nsigned and reported to ZATCA, and once none is pending nothing runs for it\nuntil it is reinstated.",
         "tags": [
           "platform"
         ]

@@ -156,17 +156,23 @@ it goes into the audit trail about their tenant, under your name, and they read
 it there: `GET /v1/audit` on their host answers them while everything else is
 `503`.
 
-While suspended, nothing runs for the tenant: its members, keys and public
-pages get `503 access.tenant_unavailable` everywhere but the owner's
-`GET /v1/audit`, the worker stops claiming it, and a
-visit already under way stops before its next job. That includes **ZATCA
-reporting** — a simplified invoice has 24 hours to be reported, so a suspension
-longer than a day can push the ones issued just before it past their deadline;
-after reinstatement they are counted in `overdue` at `GET /v1/tax_sa/zatca`.
-Payment gateway callbacks are refused too; the settle sweep collects what they
-would have said once the tenant is back. The fleet migrator keeps a suspended
-tenant's schema current. Other API nodes refuse the tenant within five seconds,
-at once where they share Redis.
+A suspension has two halves. From the moment you act the tenant is
+`suspending`: its members, keys and public pages get
+`503 access.tenant_unavailable` everywhere but the owner's `GET /v1/audit`, and
+every background job stops except the two that **sign and report its issued
+documents to ZATCA** — a simplified invoice has 24 hours to be reported, and a
+suspension must not be what makes one late. The worker keeps visiting for those
+two until nothing is left for them, then moves the tenant to `suspended`,
+records `tenant.suspension_complete` in its audit trail, and never claims it
+again. A tenant that never finished ZATCA onboarding has nothing anybody can
+sign or send, and completes at the first visit. If ZATCA is unreachable the
+tenant stays `suspending` — shut, and retried — until it answers.
+
+Payment gateway callbacks are refused from the first half on; the settle sweep
+collects what they would have said once the tenant is back. Reinstating works
+from either half. The fleet migrator keeps a suspended tenant's schema current.
+Other API nodes refuse the tenant within five seconds, at once where they share
+Redis.
 
 **The control plane's dead letters** — signup, invitation and reset emails and
 sign-in texts it gave up on — are support's or a superadmin's, over

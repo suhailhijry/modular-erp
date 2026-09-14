@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, slug, display_name, status, cluster,\n                      database_name, demo_expires_at,\n                      requires_second_factor, created_at\n                 FROM tenant\n                WHERE status IN ('active', 'suspended')\n                ORDER BY created_at",
+  "query": "SELECT id, slug, display_name, status, cluster,\n                      database_name, demo_expires_at,\n                      requires_second_factor, created_at\n                 FROM tenant\n                WHERE status IN ('active', 'suspending', 'suspended')\n                ORDER BY created_at",
   "describe": {
     "columns": [
       {
@@ -118,5 +118,5 @@
       false
     ]
   },
-  "hash": "7897270b0da55c280ff579b15733d0d0bae4fa47072ac19d660edbb6243c244f"
+  "hash": "9fb36c9e1ca13f4f8c0ef379ee3e296a0cf5fa9612c326b446de58349c958420"
 }

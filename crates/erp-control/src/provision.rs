@@ -446,7 +446,7 @@ impl ControlPlane {
                       t.requires_second_factor, t.created_at
                  FROM tenant t
                  JOIN entitlement e ON e.tenant_id = t.id
-                WHERE t.status IN ('active', 'suspended')
+                WHERE t.status IN ('active', 'suspending', 'suspended')
                   AND e.module_id = $1
                   AND e.disabled_at IS NULL
                 ORDER BY t.created_at"#,
@@ -543,9 +543,8 @@ impl ControlPlane {
         sqlx::query!("DELETE FROM tenant WHERE id = $1", tenant.id.as_uuid())
             .execute(&mut *tx)
             .await?;
-        tx.commit().await?;
-
         self.record(
+            &mut tx,
             Actor::system(),
             Some(tenant.id),
             "tenant.abandoned",
@@ -554,6 +553,7 @@ impl ControlPlane {
             serde_json::json!({ "slug": tenant.slug, "database": tenant.database_name }),
         )
         .await?;
+        tx.commit().await?;
 
         tracing::info!(
             tenant = %tenant.id,
@@ -617,6 +617,7 @@ impl ControlPlane {
         actor: Actor,
     ) -> Result<(), AccessError> {
         let seconds = i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX);
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "UPDATE tenant
                 SET demo_expires_at = now() + ($2::BIGINT * INTERVAL '1 second')
@@ -624,10 +625,11 @@ impl ControlPlane {
             tenant_id.as_uuid(),
             seconds,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         self.record(
+            &mut tx,
             actor,
             Some(tenant_id),
             "tenant.demo_expiry_set",
@@ -635,7 +637,9 @@ impl ControlPlane {
             &tenant_id.to_string(),
             serde_json::json!({ "ttl_seconds": seconds }),
         )
-        .await
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Demo tenants whose time is up.
@@ -716,6 +720,7 @@ impl ControlPlane {
         // absorbs.
         self.drop_database(tenant).await?;
 
+        let mut tx = self.pool.begin().await?;
         let deleted = sqlx::query!(
             "DELETE FROM tenant
               WHERE id = $1
@@ -723,11 +728,12 @@ impl ControlPlane {
                 AND demo_expires_at <= now()",
             tenant.id.as_uuid(),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
 
         self.record(
+            &mut tx,
             Actor::system(),
             Some(tenant.id),
             "tenant.demo_reaped",
@@ -736,6 +742,7 @@ impl ControlPlane {
             serde_json::json!({ "slug": tenant.slug, "database": tenant.database_name }),
         )
         .await?;
+        tx.commit().await?;
 
         tracing::info!(
             tenant = %tenant.id,

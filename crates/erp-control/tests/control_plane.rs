@@ -486,6 +486,24 @@ async fn a_suspended_tenant_is_refused_at_every_door_and_reinstated_at_once() {
         .await
         .expect("suspends");
 
+    // **Both halves shut the doors.** `suspending` is the drain — the worker
+    // still signs and reports the tenant's documents — and nobody gets in
+    // during it any more than after.
+    for (door, answer) in [("a member", enter().await), ("the public", public().await)] {
+        assert!(
+            matches!(
+                answer,
+                Err(AccessError::TenantNotActive {
+                    status: TenantStatus::Suspending
+                })
+            ),
+            "{door} got into a tenant being suspended: {answer:?}"
+        );
+    }
+    assert!(
+        control.finish_suspension(tenant).await.expect("finishes"),
+        "the drain finished a tenant that was suspending"
+    );
     for (door, answer) in [("a member", enter().await), ("the public", public().await)] {
         assert!(
             matches!(
@@ -518,6 +536,10 @@ async fn a_suspended_tenant_is_refused_at_every_door_and_reinstated_at_once() {
 /// `Ok` as a no-op, which is what `activate_tenant` used to do, auditing a
 /// `tenant.activated` that had activated nothing.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every status move, from every status, in the one place their order can be read"
+)]
 async fn a_tenant_moves_only_from_the_status_it_is_in() {
     let mut fixture = Fixture::new().await;
     let tenant = fixture.provision("acme").await;
@@ -575,16 +597,53 @@ async fn a_tenant_moves_only_from_the_status_it_is_in() {
         control
             .suspend_tenant(tenant, "again", Actor::system())
             .await,
-        TenantStatus::Suspended,
+        TenantStatus::Suspending,
         TenantStatus::Active,
     );
     // Activating is not reinstating.
     wrong(
         control.activate_tenant(tenant, Actor::system()).await,
-        TenantStatus::Suspended,
+        TenantStatus::Suspending,
         TenantStatus::Provisioning,
     );
+    assert_eq!(status(tenant).await, TenantStatus::Suspending);
+
+    // **The drain's move, and only from `suspending`.** Not an error from any
+    // other status: the worker that asks has simply nothing to finish.
+    assert!(control.finish_suspension(tenant).await.expect("finishes"));
     assert_eq!(status(tenant).await, TenantStatus::Suspended);
+    assert!(
+        !control.finish_suspension(tenant).await.expect("answers"),
+        "a finished suspension was finished again"
+    );
+    wrong(
+        control
+            .suspend_tenant(tenant, "again", Actor::system())
+            .await,
+        TenantStatus::Suspended,
+        TenantStatus::Active,
+    );
+
+    // Reinstating works from either half: back to active, suspend again, and
+    // a tenant still draining is reinstated as readily.
+    control
+        .reinstate_tenant(tenant, Actor::system())
+        .await
+        .expect("reinstates from suspended");
+    control
+        .suspend_tenant(tenant, "unpaid again", Actor::system())
+        .await
+        .expect("suspends");
+    assert_eq!(status(tenant).await, TenantStatus::Suspending);
+    control
+        .reinstate_tenant(tenant, Actor::system())
+        .await
+        .expect("reinstates from suspending");
+    assert_eq!(status(tenant).await, TenantStatus::Active);
+    assert!(
+        !control.finish_suspension(tenant).await.expect("answers"),
+        "an active tenant was moved to suspended"
+    );
 
     let nobody = TenantId::new();
     for answer in [
@@ -610,7 +669,17 @@ async fn a_tenant_moves_only_from_the_status_it_is_in() {
     .fetch_all(control.pool())
     .await
     .expect("reads");
-    assert_eq!(actions, ["tenant.activated", "tenant.suspended"]);
+    assert_eq!(
+        actions,
+        [
+            "tenant.activated",
+            "tenant.suspended",
+            "tenant.suspension_complete",
+            "tenant.reinstated",
+            "tenant.suspended",
+            "tenant.reinstated",
+        ]
+    );
 
     fixture.cleanup().await;
 }
@@ -672,7 +741,7 @@ async fn a_suspension_says_why_and_is_audited_and_the_schema_refuses_one_that_do
     assert_eq!(
         row().await,
         (
-            "suspended".to_owned(),
+            "suspending".to_owned(),
             Some("unpaid since August".to_owned()),
             true
         )
@@ -682,6 +751,16 @@ async fn a_suspension_says_why_and_is_audited_and_the_schema_refuses_one_that_do
         (
             Some(staff.into_uuid()),
             serde_json::json!({ "reason": "unpaid since August" })
+        )
+    );
+    // The reason and the instant survive the drain's move.
+    control.finish_suspension(tenant).await.expect("finishes");
+    assert_eq!(
+        row().await,
+        (
+            "suspended".to_owned(),
+            Some("unpaid since August".to_owned()),
+            true
         )
     );
 
@@ -711,9 +790,11 @@ async fn a_suspension_says_why_and_is_audited_and_the_schema_refuses_one_that_do
 #[tokio::test]
 async fn the_audit_trail_cannot_be_rewritten() {
     let fixture = Fixture::new().await;
+    let mut conn = fixture.control.pool().acquire().await.expect("connection");
     fixture
         .control
         .record(
+            &mut conn,
             Actor::system(),
             None,
             "test.action",
@@ -723,6 +804,7 @@ async fn the_audit_trail_cannot_be_rewritten() {
         )
         .await
         .expect("records");
+    drop(conn);
 
     // Append-only is enforced by the database, not by discipline.
     assert!(

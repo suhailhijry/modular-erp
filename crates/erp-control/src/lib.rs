@@ -570,7 +570,12 @@ impl ControlPlane {
             });
         }
 
+        // audit-only: entering changes nothing in the control plane, so there
+        // is no transaction for the entry to share; it is written before the
+        // door opens, and a failure to write it keeps the door shut.
+        let mut conn = self.pool.acquire().await?;
         self.record(
+            &mut conn,
             Actor::identity(staff_id),
             Some(tenant_id),
             "tenant.support_access",
@@ -579,6 +584,7 @@ impl ControlPlane {
             serde_json::json!({ "reason": reason }),
         )
         .await?;
+        drop(conn);
 
         // Support access is interactive by definition — an engineer is waiting.
         self.open(&tenant, Lane::Interactive).await
@@ -614,9 +620,11 @@ impl ControlPlane {
         // schema yet. A suspended one is not refused here, and nothing runs for
         // it anyway: the worker, this door's caller, never claims one
         // (`claim_tenants`) and stops a visit whose tenant is suspended under
-        // it (`renew_lease`). The fleet migrator and module refresh do bring a
-        // suspended tenant's schema current, and `reseal_fleet` its secrets,
-        // but through their own direct connections, not through here.
+        // it (`renew_lease`). One still *suspending* is claimed, and this is
+        // the door its drain jobs come through. The fleet migrator and module
+        // refresh do bring a suspended tenant's schema current, and
+        // `reseal_fleet` its secrets, but through their own direct
+        // connections, not through here.
         if matches!(
             tenant.status,
             TenantStatus::Deleted | TenantStatus::Provisioning
@@ -740,6 +748,7 @@ impl ControlPlane {
     ) -> Result<String, AccessError> {
         let domain = domain.trim().to_lowercase();
         let token = crate::auth::verification_token().map_err(AccessError::Auth)?;
+        let mut tx = self.pool.begin().await?;
         let existing: Option<String> = sqlx::query_scalar!(
             "INSERT INTO tenant_domain (tenant, domain, verification_token)
              VALUES ($1, $2, $3)
@@ -750,11 +759,12 @@ impl ControlPlane {
             domain,
             token,
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
         let token = existing.unwrap_or(token);
         self.record(
+            &mut tx,
             actor,
             Some(tenant_id),
             "tenant.domain_claimed",
@@ -763,6 +773,7 @@ impl ControlPlane {
             serde_json::json!({ "domain": domain }),
         )
         .await?;
+        tx.commit().await?;
         Ok(token)
     }
 
@@ -806,17 +817,17 @@ impl ControlPlane {
                 expected: record_value(&claimed.token),
             });
         }
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "UPDATE tenant_domain SET verified_at = now()
               WHERE tenant = $1 AND domain = $2 AND verified_at IS NULL",
             tenant_id.as_uuid(),
             domain,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        self.forget(crate::shared::Invalidate::Origins(tenant_id))
-            .await;
         self.record(
+            &mut tx,
             actor,
             Some(tenant_id),
             "tenant.domain_verified",
@@ -824,7 +835,13 @@ impl ControlPlane {
             &tenant_id.to_string(),
             serde_json::json!({ "domain": domain, "record": name }),
         )
-        .await
+        .await?;
+        tx.commit().await?;
+        // After the commit, so a read racing this cannot refill the cache
+        // with the row as it was.
+        self.forget(crate::shared::Invalidate::Origins(tenant_id))
+            .await;
+        Ok(())
     }
 
     /// **Licenses an origin under a proved domain.**
@@ -863,6 +880,7 @@ impl ControlPlane {
                 expected: format!("{}<token>", domains::RECORD_PREFIX),
             });
         }
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "INSERT INTO tenant_origin (tenant, origin, domain)
              VALUES ($1, $2, $3)
@@ -871,11 +889,10 @@ impl ControlPlane {
             origin,
             domain,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        self.forget(crate::shared::Invalidate::Origins(tenant_id))
-            .await;
         self.record(
+            &mut tx,
             actor,
             Some(tenant_id),
             "tenant.origin_allowed",
@@ -883,7 +900,11 @@ impl ControlPlane {
             &tenant_id.to_string(),
             serde_json::json!({ "origin": origin, "domain": domain }),
         )
-        .await
+        .await?;
+        tx.commit().await?;
+        self.forget(crate::shared::Invalidate::Origins(tenant_id))
+            .await;
+        Ok(())
     }
 
     /// Withdraws one origin. Takes effect across the fleet within the entry
@@ -895,17 +916,16 @@ impl ControlPlane {
         actor: Actor,
     ) -> Result<(), AccessError> {
         let origin = origin.trim().to_lowercase();
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "DELETE FROM tenant_origin WHERE tenant = $1 AND origin = $2",
             tenant_id.as_uuid(),
             origin,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-
-        self.forget(crate::shared::Invalidate::Origins(tenant_id))
-            .await;
         self.record(
+            &mut tx,
             actor,
             Some(tenant_id),
             "tenant.origin_revoked",
@@ -913,7 +933,11 @@ impl ControlPlane {
             &tenant_id.to_string(),
             serde_json::json!({ "origin": origin }),
         )
-        .await
+        .await?;
+        tx.commit().await?;
+        self.forget(crate::shared::Invalidate::Origins(tenant_id))
+            .await;
+        Ok(())
     }
 
     /// Claims tenants that are due for a visit, for the length of one visit.
@@ -956,7 +980,7 @@ impl ControlPlane {
              WHERE id IN (
                  SELECT id
                    FROM tenant
-                  WHERE status = 'active'
+                  WHERE status IN ('active', 'suspending')
                     AND next_visit_at <= now()
                     AND (worker_lease_until IS NULL OR worker_lease_until <= now())
                   ORDER BY next_visit_at
@@ -1014,10 +1038,14 @@ impl ControlPlane {
     /// them. A visit that outlives its lease without renewing is exactly the
     /// concurrent-visit race `claim_tenants` describes, from the other side.
     ///
-    /// `false` also means the tenant stopped being active — suspended since the
-    /// visit began. `claim_tenants` would not have claimed it, and a visit
+    /// `false` also means the tenant stopped being visited — suspended since
+    /// the visit began, or moved from `suspending` to `suspended` by another
+    /// visit's drain. `claim_tenants` would not have claimed it, and a visit
     /// already under way must not run the rest of its jobs either, saved-card
-    /// charges among them, for a tenant nothing should run for.
+    /// charges among them, for a tenant nothing should run for. A tenant that
+    /// became `suspending` mid-visit is still ours: the visit's remaining jobs
+    /// are judged by [`crate::TenantStatus::is_visited`]'s caller, the worker,
+    /// which reads the status it claimed the tenant under.
     pub async fn renew_lease(
         &self,
         tenant_id: TenantId,
@@ -1032,7 +1060,7 @@ impl ControlPlane {
               WHERE id = $1
                 AND worker_lease_owner = $2
                 AND worker_lease_until > now()
-                AND status = 'active'",
+                AND status IN ('active', 'suspending')",
             tenant_id.as_uuid(),
             owner,
             lease_millis,
@@ -1337,15 +1365,17 @@ impl ControlPlane {
 
     pub async fn create_identity(&self, actor: Actor) -> Result<Identity, AccessError> {
         let id = IdentityId::new();
+        let mut tx = self.pool.begin().await?;
         let row = sqlx::query!(
             r#"INSERT INTO identity (id) VALUES ($1)
                RETURNING id as "id: IdentityId", status, created_at"#,
             id.as_uuid(),
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
         self.record(
+            &mut tx,
             actor,
             None,
             "identity.created",
@@ -1354,6 +1384,7 @@ impl ControlPlane {
             serde_json::json!({}),
         )
         .await?;
+        tx.commit().await?;
 
         Ok(Identity {
             id: row.id,
@@ -1389,6 +1420,7 @@ impl ControlPlane {
         reason: &str,
         actor: Actor,
     ) -> Result<(), AccessError> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "UPDATE identity
                 SET status = 'suspended', suspended_reason = $2, suspended_at = now()
@@ -1396,14 +1428,10 @@ impl ControlPlane {
             id.as_uuid(),
             reason,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        // Local invalidation: this node stops honouring the identity at once.
-        // Other nodes converge within ENTRY_CACHE_TTL — a documented window,
-        // see the `cache` module.
-        self.forget(crate::shared::Invalidate::Identity(id)).await;
-
         self.record(
+            &mut tx,
             actor,
             None,
             "identity.suspended",
@@ -1411,7 +1439,13 @@ impl ControlPlane {
             &id.to_string(),
             serde_json::json!({ "reason": reason }),
         )
-        .await
+        .await?;
+        tx.commit().await?;
+        // Local invalidation: this node stops honouring the identity at once.
+        // Other nodes converge within ENTRY_CACHE_TTL — a documented window,
+        // see the `cache` module.
+        self.forget(crate::shared::Invalidate::Identity(id)).await;
+        Ok(())
     }
 
     /// **Erases a person**, keeping what the platform did.
@@ -1454,10 +1488,13 @@ impl ControlPlane {
     /// answering it in passing while fixing a schema bug would be answering it
     /// badly.
     pub async fn erase_identity(&self, id: IdentityId, actor: Actor) -> Result<(), AccessError> {
-        // **Recorded first.** After the delete there is no identity to name in
-        // the entry, and an erasure nobody can see having happened is the one
-        // kind this must not be.
+        // **Recorded first, in the erasure's own transaction.** The entry names
+        // the identity by id in `subject_id`, which is text and survives the
+        // delete; and an erasure nobody can see having happened is the one
+        // kind this must not be, which is why the two commit together.
+        let mut tx = self.pool.begin().await?;
         self.record(
+            &mut tx,
             actor,
             None,
             "identity.erased",
@@ -1468,8 +1505,9 @@ impl ControlPlane {
         .await?;
 
         sqlx::query!("DELETE FROM identity WHERE id = $1", id.as_uuid())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
 
         // This node stops honouring them at once; others converge within
         // `ENTRY_CACHE_TTL`, the same window as a suspension.
@@ -1507,6 +1545,7 @@ impl ControlPlane {
         // `status` is deliberately untouched. It has its own command and means
         // something operational; re-registering a draining cluster must not
         // quietly put it back into service.
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "INSERT INTO cluster (name, dsn_env, replica_dsn_env, max_active_tenants, max_databases)
              VALUES ($1, $2, $3, $4, $5)
@@ -1521,10 +1560,11 @@ impl ControlPlane {
             max_active_tenants,
             max_databases,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         self.record(
+            &mut tx,
             actor,
             None,
             "cluster.registered",
@@ -1535,7 +1575,9 @@ impl ControlPlane {
                 "max_databases": max_databases,
             }),
         )
-        .await
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Moves a cluster between accepting placements and not.
@@ -1548,15 +1590,17 @@ impl ControlPlane {
         status: ClusterStatus,
         actor: Actor,
     ) -> Result<(), AccessError> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "UPDATE cluster SET status = $2 WHERE name = $1",
             name,
             status.as_str(),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         self.record(
+            &mut tx,
             actor,
             None,
             "cluster.status_changed",
@@ -1564,7 +1608,9 @@ impl ControlPlane {
             name,
             serde_json::json!({ "status": status.as_str() }),
         )
-        .await
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// What every cluster is currently carrying.
@@ -1647,6 +1693,7 @@ impl ControlPlane {
         let id = TenantId::new();
         let database_name = tenant_database_name(id);
 
+        let mut tx = self.pool.begin().await?;
         let row = sqlx::query!(
             r#"INSERT INTO tenant (id, slug, display_name, cluster, database_name)
                VALUES ($1, $2, $3, $4, $5)
@@ -1659,7 +1706,7 @@ impl ControlPlane {
             cluster,
             database_name,
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| match &e {
             // A taken slug is a normal outcome of self-service signup, not a
@@ -1672,6 +1719,7 @@ impl ControlPlane {
         })?;
 
         self.record(
+            &mut tx,
             actor,
             Some(id),
             "tenant.registered",
@@ -1680,6 +1728,7 @@ impl ControlPlane {
             serde_json::json!({ "slug": slug, "cluster": cluster }),
         )
         .await?;
+        tx.commit().await?;
 
         tenant_from_row(
             row.id,
@@ -1811,15 +1860,17 @@ impl ControlPlane {
     /// [`Self::reinstate_tenant`], and this used to answer `Ok` to it, change
     /// nothing, and record a `tenant.activated` anyway.
     pub async fn activate_tenant(&self, id: TenantId, actor: Actor) -> Result<(), AccessError> {
+        let mut tx = self.pool.begin().await?;
         let rows = sqlx::query!(
             "UPDATE tenant SET status = 'active', activated_at = now()
               WHERE id = $1 AND status = 'provisioning'",
             id.as_uuid(),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
         self.moved(
+            tx,
             id,
             rows,
             TenantStatus::Provisioning,
@@ -1830,15 +1881,19 @@ impl ControlPlane {
         .await
     }
 
-    /// **Suspends a tenant: nothing runs for it until it is reinstated.**
+    /// **Suspends a tenant: its doors shut now, and once its issued documents
+    /// are signed and reported nothing runs for it until it is reinstated.**
     ///
-    /// Every door refuses it — members, API keys and the public alike get the
-    /// same `access.tenant_unavailable` — the worker stops claiming it, and a
-    /// visit already under way stops before its next job, because
-    /// [`Self::renew_lease`] answers `false` for a tenant no longer active.
-    /// Support can still open it ([`Self::enter_for_support`]), and the fleet
-    /// migrator still brings its schema current, so it comes back to one this
-    /// build can read.
+    /// The first half is `suspending` (decided 2026-09-14). Every door refuses
+    /// it — members, API keys and the public alike get the same
+    /// `access.tenant_unavailable` — but the worker keeps claiming it for the
+    /// two jobs that sign and report to ZATCA, and for those alone; when they
+    /// have nothing left it calls [`Self::finish_suspension`], and from
+    /// `suspended` on the worker stops claiming it, and a visit already under
+    /// way stops before its next job, because [`Self::renew_lease`] answers
+    /// `false`. Support can still open it ([`Self::enter_for_support`]) in
+    /// either half, and the fleet migrator still brings its schema current, so
+    /// it comes back to one this build can read.
     ///
     /// Sessions are left alone: they belong to people, who may work for other
     /// tenants too. This node refuses the tenant on the next request; the others
@@ -1857,14 +1912,15 @@ impl ControlPlane {
         actor: Actor,
     ) -> Result<(), AccessError> {
         let reason = reason.trim();
+        let mut tx = self.pool.begin().await?;
         let rows = sqlx::query!(
             "UPDATE tenant
-                SET status = 'suspended', suspended_reason = $2, suspended_at = now()
+                SET status = 'suspending', suspended_reason = $2, suspended_at = now()
               WHERE id = $1 AND status = 'active'",
             id.as_uuid(),
             reason,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(db)
@@ -1876,6 +1932,7 @@ impl ControlPlane {
         })?
         .rows_affected();
         self.moved(
+            tx,
             id,
             rows,
             TenantStatus::Active,
@@ -1894,15 +1951,19 @@ impl ControlPlane {
     /// [`AccessError::WrongTenantStatus`] unless the tenant is suspended;
     /// [`AccessError::NoSuchTenant`].
     pub async fn reinstate_tenant(&self, id: TenantId, actor: Actor) -> Result<(), AccessError> {
+        let mut tx = self.pool.begin().await?;
+        // From either half of a suspension: one still draining is reinstated
+        // as readily as one that finished, and its drain simply stops mattering.
         let rows = sqlx::query!(
             "UPDATE tenant SET status = 'active', suspended_reason = NULL, suspended_at = NULL
-              WHERE id = $1 AND status = 'suspended'",
+              WHERE id = $1 AND status IN ('suspending', 'suspended')",
             id.as_uuid(),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
         self.moved(
+            tx,
             id,
             rows,
             TenantStatus::Suspended,
@@ -1913,15 +1974,60 @@ impl ControlPlane {
         .await
     }
 
+    /// **The second half of a suspension**: the worker found nothing left to
+    /// sign or report, so nothing runs for the tenant from here on.
+    ///
+    /// `false` when the tenant is no longer `suspending` — reinstated while the
+    /// drain ran, or already finished by another visit — which is not an error:
+    /// the worker that asked simply has nothing to finish. Recorded under the
+    /// system's name, because no person did it; the reason and the instant
+    /// staff wrote stay on the row.
+    ///
+    /// # Errors
+    /// The database.
+    pub async fn finish_suspension(&self, id: TenantId) -> Result<bool, AccessError> {
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query!(
+            "UPDATE tenant SET status = 'suspended'
+              WHERE id = $1 AND status = 'suspending'",
+            id.as_uuid(),
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if rows == 0 {
+            return Ok(false);
+        }
+        self.record(
+            &mut tx,
+            Actor::system(),
+            Some(id),
+            "tenant.suspension_complete",
+            "tenant",
+            &id.to_string(),
+            serde_json::json!({}),
+        )
+        .await?;
+        tx.commit().await?;
+        self.forget(crate::shared::Invalidate::Tenant(id)).await;
+        Ok(true)
+    }
+
     /// **The one place a tenant status change is judged**, after its `UPDATE
     /// ... WHERE status = expected` has run.
     ///
     /// No row changed means the tenant was not in `expected`, and the caller
     /// is told what it is in instead — never `Ok`, so a repeat is not recorded
-    /// as though it did something. A change is forgotten from every entry cache
-    /// and put on the record.
+    /// as though it did something. A change is put on the record **in the
+    /// transaction the `UPDATE` ran on**, committed here, and then forgotten
+    /// from every entry cache.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the transaction joined a call that was already at the limit; the six audit fields are `record`'s"
+    )]
     async fn moved(
         &self,
+        mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
         id: TenantId,
         rows: u64,
         expected: TenantStatus,
@@ -1930,6 +2036,7 @@ impl ControlPlane {
         actor: Actor,
     ) -> Result<(), AccessError> {
         if rows == 0 {
+            // Dropping `tx` rolls back the nothing it did.
             return Err(match self.tenant(id).await? {
                 None => AccessError::NoSuchTenant,
                 Some(tenant) => AccessError::WrongTenantStatus {
@@ -1938,9 +2045,19 @@ impl ControlPlane {
                 },
             });
         }
+        self.record(
+            &mut tx,
+            actor,
+            Some(id),
+            action,
+            "tenant",
+            &id.to_string(),
+            detail,
+        )
+        .await?;
+        tx.commit().await?;
         self.forget(crate::shared::Invalidate::Tenant(id)).await;
-        self.record(actor, Some(id), action, "tenant", &id.to_string(), detail)
-            .await
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1967,6 +2084,7 @@ impl ControlPlane {
         // it. Reviving a revoked membership is this function's job; quietly
         // changing a *live* member's role is not, and without that clause this
         // would be a way around `change_role`'s last-owner guard.
+        let mut tx = self.pool.begin().await?;
         let revived = sqlx::query_scalar!(
             "INSERT INTO membership (id, identity_id, scope_kind, tenant_id, role)
              VALUES ($1, $2, $3, $4, $5)
@@ -1980,13 +2098,14 @@ impl ControlPlane {
             scope.tenant().map(TenantId::into_uuid),
             role,
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
         let Some(id) = revived.map(MembershipId::from_uuid) else {
             // A live membership was already there. Idempotent success, and
             // deliberately without touching the role — callers that mean to
             // change one call `change_role`, which knows about last owners.
+            // Nothing was written, so the transaction drops.
             return self
                 .membership_id(identity_id, scope)
                 .await?
@@ -1996,6 +2115,23 @@ impl ControlPlane {
                     )
                 });
         };
+
+        self.record(
+            &mut tx,
+            actor,
+            scope.tenant(),
+            "membership.granted",
+            "identity",
+            &identity_id.to_string(),
+            serde_json::json!({
+                "scope": scope.kind_str(),
+                "tenant": scope.tenant().map(|t| t.to_string()),
+                "role": role,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+
         // A grant or revocation must take effect now on this node, not after
         // the TTL. Both caches, because the scope decides which one holds it.
         match scope.tenant() {
@@ -2011,20 +2147,6 @@ impl ControlPlane {
                     .await;
             }
         }
-
-        self.record(
-            actor,
-            scope.tenant(),
-            "membership.granted",
-            "identity",
-            &identity_id.to_string(),
-            serde_json::json!({
-                "scope": scope.kind_str(),
-                "tenant": scope.tenant().map(|t| t.to_string()),
-                "role": role,
-            }),
-        )
-        .await?;
 
         Ok(id)
     }
@@ -2055,6 +2177,7 @@ impl ControlPlane {
         scope: Scope,
         actor: Actor,
     ) -> Result<bool, AccessError> {
+        let mut tx = self.pool.begin().await?;
         let revoked = sqlx::query!(
             "UPDATE membership SET revoked_at = now()
               WHERE identity_id = $1
@@ -2063,7 +2186,7 @@ impl ControlPlane {
             identity_id.as_uuid(),
             scope.tenant().map(TenantId::into_uuid),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
 
@@ -2079,8 +2202,23 @@ impl ControlPlane {
             identity_id.as_uuid(),
             scope.tenant().map(TenantId::into_uuid),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        self.record(
+            &mut tx,
+            actor,
+            scope.tenant(),
+            "membership.revoked",
+            "identity",
+            &identity_id.to_string(),
+            serde_json::json!({
+                "scope": scope.kind_str(),
+                "tenant": scope.tenant().map(|t| t.to_string()),
+            }),
+        )
+        .await?;
+        tx.commit().await?;
 
         // A grant or revocation must take effect now on this node, not after
         // the TTL. Both caches, because the scope decides which one holds it.
@@ -2097,19 +2235,6 @@ impl ControlPlane {
                     .await;
             }
         }
-
-        self.record(
-            actor,
-            scope.tenant(),
-            "membership.revoked",
-            "identity",
-            &identity_id.to_string(),
-            serde_json::json!({
-                "scope": scope.kind_str(),
-                "tenant": scope.tenant().map(|t| t.to_string()),
-            }),
-        )
-        .await?;
 
         Ok(revoked > 0)
     }
@@ -2224,6 +2349,7 @@ impl ControlPlane {
         module: &ModuleId,
         actor: Actor,
     ) -> Result<(), AccessError> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "INSERT INTO entitlement (tenant_id, module_id) VALUES ($1, $2)
              ON CONFLICT (tenant_id, module_id)
@@ -2231,12 +2357,10 @@ impl ControlPlane {
             tenant_id.as_uuid(),
             module.as_str(),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        self.forget(crate::shared::Invalidate::Entitlements(tenant_id))
-            .await;
-
         self.record(
+            &mut tx,
             actor,
             Some(tenant_id),
             "module.enabled",
@@ -2244,7 +2368,11 @@ impl ControlPlane {
             &tenant_id.to_string(),
             serde_json::json!({ "module": module.as_str() }),
         )
-        .await
+        .await?;
+        tx.commit().await?;
+        self.forget(crate::shared::Invalidate::Entitlements(tenant_id))
+            .await;
+        Ok(())
     }
 
     /// Switches a module off. **Never drops its tables** — a tenant who
@@ -2256,18 +2384,17 @@ impl ControlPlane {
         module: &ModuleId,
         actor: Actor,
     ) -> Result<(), AccessError> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "UPDATE entitlement SET disabled_at = now()
               WHERE tenant_id = $1 AND module_id = $2 AND disabled_at IS NULL",
             tenant_id.as_uuid(),
             module.as_str(),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        self.forget(crate::shared::Invalidate::Entitlements(tenant_id))
-            .await;
-
         self.record(
+            &mut tx,
             actor,
             Some(tenant_id),
             "module.disabled",
@@ -2275,7 +2402,11 @@ impl ControlPlane {
             &tenant_id.to_string(),
             serde_json::json!({ "module": module.as_str() }),
         )
-        .await
+        .await?;
+        tx.commit().await?;
+        self.forget(crate::shared::Invalidate::Entitlements(tenant_id))
+            .await;
+        Ok(())
     }
 
     pub async fn enabled_modules(
@@ -2322,8 +2453,23 @@ impl ControlPlane {
     /// on the build before `0019` files its entries during a deploy. So a
     /// `None` entry with such a subject or detail is in that tenant's trail
     /// anyway. Every writer that passes `None` today names none of the three.
+    ///
+    /// **On the connection the change was made on**, so the entry commits with
+    /// the change or not at all. Until 2026-09-14 this ran on the pool, after
+    /// the caller's own commit, and a crash between the two left an act that
+    /// stood with no record that it happened — the one shape an audit trail
+    /// must not have. Every writer passes its transaction; the two acts with
+    /// no control-plane write of their own, support entering a tenant and a
+    /// confirmed signup whose build is many transactions, acquire a
+    /// connection and say `audit-only:` beside it. `tests/audit.rs` scans for
+    /// anything else.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the connection joined the six fields an entry has always taken; a struct for them would be thirty-one call sites of ceremony"
+    )]
     pub async fn record(
         &self,
+        conn: &mut sqlx::PgConnection,
         actor: Actor,
         tenant: Option<TenantId>,
         action: &str,
@@ -2344,7 +2490,7 @@ impl ControlPlane {
             subject_id,
             detail,
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
@@ -2578,6 +2724,7 @@ fn parse_tenant_status(raw: &str) -> Result<TenantStatus, AccessError> {
     match raw {
         "provisioning" => Ok(TenantStatus::Provisioning),
         "active" => Ok(TenantStatus::Active),
+        "suspending" => Ok(TenantStatus::Suspending),
         "suspended" => Ok(TenantStatus::Suspended),
         "deleted" => Ok(TenantStatus::Deleted),
         other => Err(AccessError::Corrupt(format!(

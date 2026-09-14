@@ -261,12 +261,11 @@ impl ControlPlane {
             .await
             .map_err(|e| AccessError::Corrupt(e.to_string()))?;
 
-        tx.commit().await.map_err(AccessError::Database)?;
-
         // Attributed to the system, because there is no identity yet in the
         // case this exists for. The handle is the subject, so an operator
         // looking at a burst of these can see what was being aimed at.
         self.record(
+            &mut tx,
             Actor::system(),
             None,
             "signup.requested",
@@ -275,6 +274,8 @@ impl ControlPlane {
             serde_json::json!({ "slug": slug, "modules": names }),
         )
         .await?;
+
+        tx.commit().await.map_err(AccessError::Database)?;
 
         Ok((
             PendingSignup {
@@ -452,7 +453,14 @@ impl ControlPlane {
 
         match built {
             Ok(confirmed) => {
+                // audit-only: the build is many transactions across two
+                // databases, each with its own entry — `tenant.registered`,
+                // `membership.granted`, `tenant.activated` — so there is no one
+                // transaction for this summary to share. A crash here loses
+                // only the summary; the acts it summarises are on the record.
+                let mut conn = self.pool.acquire().await.map_err(AccessError::Database)?;
                 self.record(
+                    &mut conn,
                     Actor::identity(confirmed.identity),
                     Some(confirmed.tenant.id),
                     "signup.confirmed",

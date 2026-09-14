@@ -228,9 +228,8 @@ impl ControlPlane {
             .await
             .map_err(|e| AccessError::Corrupt(e.to_string()))?;
 
-        tx.commit().await.map_err(AccessError::Database)?;
-
         self.record(
+            &mut tx,
             Actor::identity(invited_by),
             Some(tenant_id),
             "invitation.created",
@@ -239,6 +238,8 @@ impl ControlPlane {
             serde_json::json!({ "handle": handle, "role": role.as_str() }),
         )
         .await?;
+
+        tx.commit().await.map_err(AccessError::Database)?;
 
         Ok((
             Invitation {
@@ -312,16 +313,18 @@ impl ControlPlane {
     ) -> Result<(), AccessError> {
         // Scoped by tenant as well as id, so an id from one tenant cannot
         // revoke another's invitation.
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "UPDATE invitation SET revoked_at = now()
               WHERE id = $1 AND tenant_id = $2 AND accepted_at IS NULL AND revoked_at IS NULL",
             invitation,
             tenant_id.as_uuid(),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         self.record(
+            &mut tx,
             actor,
             Some(tenant_id),
             "invitation.revoked",
@@ -329,7 +332,9 @@ impl ControlPlane {
             &tenant_id.to_string(),
             serde_json::json!({ "invitation": invitation.to_string() }),
         )
-        .await
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// What a link says about itself, before anyone accepts it.
@@ -413,16 +418,18 @@ impl ControlPlane {
 
         match outcome {
             Ok((identity, token, session)) => {
+                let mut tx = self.pool.begin().await.map_err(AccessError::Database)?;
                 sqlx::query!(
                     "UPDATE invitation SET accepted_by = $2 WHERE id = $1",
                     claimed.id,
                     identity.as_uuid(),
                 )
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(AccessError::Database)?;
 
                 self.record(
+                    &mut tx,
                     Actor::identity(identity),
                     Some(tenant),
                     "invitation.accepted",
@@ -431,6 +438,7 @@ impl ControlPlane {
                     serde_json::json!({ "handle": claimed.handle, "role": role.as_str() }),
                 )
                 .await?;
+                tx.commit().await.map_err(AccessError::Database)?;
 
                 Ok(Accepted {
                     identity,

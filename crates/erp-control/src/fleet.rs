@@ -259,7 +259,7 @@ impl ControlPlane {
                       database_name, demo_expires_at,
                       requires_second_factor, created_at
                  FROM tenant
-                WHERE status IN ('active', 'suspended')
+                WHERE status IN ('active', 'suspending', 'suspended')
                 ORDER BY created_at"#
         )
         .fetch_all(&self.pool)

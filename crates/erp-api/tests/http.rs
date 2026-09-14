@@ -4035,7 +4035,8 @@ async fn billing_suspends_and_reinstates_a_tenant_under_their_own_name() {
         (StatusCode::CONFLICT, Some("tenants.wrong_status")),
         "{body}"
     );
-    assert_eq!(body["args"]["status"]["value"], "suspended", "{body}");
+    // Still draining: the worker has not found its documents reported yet.
+    assert_eq!(body["args"]["status"]["value"], "suspending", "{body}");
 
     let (actor, detail): (Option<uuid::Uuid>, serde_json::Value) = sqlx::query_as(
         "SELECT actor_identity_id, detail FROM audit_entry
@@ -4603,9 +4604,11 @@ async fn the_database_keeps_the_tenant_its_writer_gave_and_the_none() {
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
 
+    let mut conn = fixture.control.pool().acquire().await.expect("connection");
     fixture
         .control
         .record(
+            &mut conn,
             Actor::system(),
             Some(acme),
             "test.filed",
@@ -4615,6 +4618,7 @@ async fn the_database_keeps_the_tenant_its_writer_gave_and_the_none() {
         )
         .await
         .expect("records");
+    drop(conn);
 
     let filed: Vec<(String, Option<uuid::Uuid>)> = sqlx::query_as(
         "SELECT action, tenant_id FROM audit_entry

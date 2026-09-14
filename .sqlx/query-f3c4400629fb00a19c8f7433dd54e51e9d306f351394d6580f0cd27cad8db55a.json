@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT t.id, t.slug, t.display_name, t.status, t.cluster,\n                      t.database_name, t.demo_expires_at,\n                      t.requires_second_factor, t.created_at\n                 FROM tenant t\n                 JOIN entitlement e ON e.tenant_id = t.id\n                WHERE t.status IN ('active', 'suspended')\n                  AND e.module_id = $1\n                  AND e.disabled_at IS NULL\n                ORDER BY t.created_at",
+  "query": "\n            UPDATE tenant\n               SET worker_lease_owner = $1,\n                   worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond'),\n                   next_visit_at      = now() + ($3::BIGINT * INTERVAL '1 millisecond')\n             WHERE id IN (\n                 SELECT id\n                   FROM tenant\n                  WHERE status IN ('active', 'suspending')\n                    AND next_visit_at <= now()\n                    AND (worker_lease_until IS NULL OR worker_lease_until <= now())\n                  ORDER BY next_visit_at\n                  LIMIT $2\n                    FOR UPDATE SKIP LOCKED\n             )\n            RETURNING id as \"id: TenantId\", slug, display_name, status, cluster,\n                      database_name, demo_expires_at,\n                      requires_second_factor, created_at, idle_visits\n            ",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
+        "name": "id: TenantId",
         "type_info": "Uuid",
         "origin": {
           "Table": {
@@ -101,11 +101,24 @@
             "name": "created_at"
           }
         }
+      },
+      {
+        "ordinal": 9,
+        "name": "idle_visits",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "idle_visits"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Text",
+        "Int8",
+        "Int8"
       ]
     },
     "nullable": [
@@ -117,8 +130,9 @@
       false,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "28ef1db830bb65a057112fbbc95e1cc408b38c6d164c0eee35cc2113eb3ecb3b"
+  "hash": "f3c4400629fb00a19c8f7433dd54e51e9d306f351394d6580f0cd27cad8db55a"
 }

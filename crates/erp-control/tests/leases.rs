@@ -419,6 +419,11 @@ async fn only_active_tenants_are_visited() {
 /// began before the suspension used to renew its lease regardless and run
 /// every remaining job, saved-card charges among them. The renewal before each
 /// job now answers "stop".
+///
+/// **A tenant still *suspending* is claimed and kept**, because the drain —
+/// signing and reporting its issued documents — runs on it (decided
+/// 2026-09-14). The worker, not the lease, limits which jobs run; the lease
+/// stops answering the moment the drain completes.
 #[tokio::test]
 async fn a_suspended_tenant_is_not_visited_and_its_visit_stops() {
     let fixture = Fixture::new().await;
@@ -442,7 +447,40 @@ async fn a_suspended_tenant_is_not_visited_and_its_visit_stops() {
         .await
         .expect("suspends");
     assert!(
-        !renew().await.expect("answers"),
+        renew().await.expect("answers"),
+        "a visit lost its lease on a tenant that is still draining"
+    );
+    fixture.expire_lease(tenant).await;
+    let draining = fixture
+        .control
+        .claim_tenants("worker-b", 10, schedule())
+        .await
+        .expect("claims");
+    assert_eq!(
+        draining.len(),
+        1,
+        "a tenant being suspended is visited, to drain"
+    );
+    assert_eq!(
+        draining[0].tenant.status,
+        erp_control::TenantStatus::Suspending,
+        "and the claim says so, which is what the worker reads"
+    );
+
+    assert!(
+        fixture
+            .control
+            .finish_suspension(tenant)
+            .await
+            .expect("finishes"),
+        "the drain finished"
+    );
+    assert!(
+        !fixture
+            .control
+            .renew_lease(tenant, "worker-b", schedule().lease)
+            .await
+            .expect("answers"),
         "a visit went on running jobs for a suspended tenant"
     );
 

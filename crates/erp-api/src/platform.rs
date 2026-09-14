@@ -229,14 +229,20 @@ async fn revoke_staff(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Suspend a tenant: nothing runs for it until it is reinstated.
+/// Suspend a tenant: its doors shut now, its issued documents are still
+/// signed and reported to ZATCA, and once none is pending nothing runs for it
+/// until it is reinstated.
 ///
 /// From the next request its members, its API keys and its public pages are
 /// all answered `503 access.tenant_unavailable` — the one message, whoever
 /// asks — everywhere but its audit trail, `GET /v1/audit`, which the owner (or
-/// a key scoped `*:manage_tenant`) can still read. Its background jobs stop, a visit already under way before its next
-/// job. Nobody is signed out: members may work for other tenants too. Support
-/// can still open it.
+/// a key scoped `*:manage_tenant`) can still read. Every background job but
+/// the two that sign and report to ZATCA stops at once; those two keep
+/// running until nothing is left for them — a simplified invoice has 24 hours
+/// to be reported, and a suspension must not be what makes it late — and the
+/// worker then records `tenant.suspension_complete` and stops visiting.
+/// Nobody is signed out: members may work for other tenants too. Support can
+/// still open it.
 ///
 /// **Write the reason for the tenant's owner.** It is recorded, under your
 /// name, in the audit trail about their tenant, and they read it there —
@@ -254,7 +260,7 @@ async fn revoke_staff(
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, description = "Not billing or superadmin — `access.not_permitted` naming `suspend_tenants` — or without a second factor", body = Problem),
         (status = NOT_FOUND, description = "No such tenant", body = Problem),
-        (status = CONFLICT, description = "Not active — already suspended, or still provisioning. `tenants.wrong_status` names what it is", body = Problem),
+        (status = CONFLICT, description = "Not active — already suspended or still draining, or still provisioning. `tenants.wrong_status` names what it is", body = Problem),
     ),
 )]
 async fn suspend_tenant(
@@ -272,8 +278,9 @@ async fn suspend_tenant(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Lift a tenant's suspension. It is usable again from the next request, and
-/// its background jobs catch up at their next visit.
+/// Lift a tenant's suspension, finished or still draining. It is usable again
+/// from the next request, and its background jobs catch up at their next
+/// visit.
 #[utoipa::path(
     post,
     path = "/v1/platform/tenants/{id}/reinstate",
@@ -284,7 +291,7 @@ async fn suspend_tenant(
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, description = "Not billing or superadmin — `access.not_permitted` naming `suspend_tenants` — or without a second factor", body = Problem),
         (status = NOT_FOUND, description = "No such tenant", body = Problem),
-        (status = CONFLICT, description = "Not suspended. `tenants.wrong_status` names what it is", body = Problem),
+        (status = CONFLICT, description = "Neither suspended nor being suspended. `tenants.wrong_status` names what it is", body = Problem),
     ),
 )]
 async fn reinstate_tenant(

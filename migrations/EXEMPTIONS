@@ -51,3 +51,11 @@ control/0018_tenant_suspension.sql  add-constraint  The previous build never
     by hand is completed by the same migration before the constraint is added,
     so there is no row, present or written by a draining pod, that it refuses.
 
+control/0022_tenant_suspending.sql  add-constraint  Both constraints are
+    **widened**, like `0012` and `0015` before them: `status` gains `suspending`,
+    and the suspension-is-complete rule now covers `suspending` as well as
+    `suspended`. Every row the previous build can write — `active` with no
+    reason, `suspended` with one — satisfied the old rules and satisfies the new
+    ones, so nothing this refuses was previously accepted. Drop-and-add is the
+    only way to widen a CHECK, which is why the scan sees a `drop constraint` it
+    cannot tell from a narrowing.

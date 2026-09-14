@@ -26,7 +26,7 @@ on good grounds — the WPS file below being the sharpest case, where guessing a
 an unverifiable specification is the *worst* available option and two other
 documents said so while this one did not.
 
-**Where this stands:** 1,759 tests green as of 2026-09-14, clippy, fmt and `cargo deny` clean. The per-phase test
+**Where this stands:** 1,761 tests green as of 2026-09-14, clippy, fmt and `cargo deny` clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end, and what blocks selling
@@ -131,9 +131,10 @@ drift with every change.
       handle's role, so an integration key walks past the document limit and the
       credit-note claim. Half a day. **Done 2026-09-14** (§79): `Access::is_owner`
       is the one question, and it is false for a machine
-- [ ] **Suspending a tenant stops its ZATCA reporting**, so a suspension of more than
+- [x] **Suspending a tenant stops its ZATCA reporting**, so a suspension of more than
       a day can push the customer past the 24-hour reporting window. Decided: a
-      `suspending` state that drains signing and reporting, then stops. 1–2 days
+      `suspending` state that drains signing and reporting, then stops. 1–2 days.
+      **Done 2026-09-14** (§81)
 - [x] **Claims switch on per claim** (decided above). Today the first grant of any
       claim arms all of them, so till staff with no employee record lose returns.
       Hours. **Done 2026-09-14** (§79): `hr::claim_placed` asks about one claim
@@ -152,8 +153,9 @@ drift with every change.
 - [x] **The request path accepts a read model newer than the build** (`<` where the
       projection runner uses `!=`), so old pods serve new-shaped tables during a
       rolling deploy. 1 hour. **Done 2026-09-14** (§79)
-- [ ] **Audit entries are written after the commit**, so a crash between the two
-      loses the record. 1 day at the root
+- [x] **Audit entries are written after the commit**, so a crash between the two
+      loses the record. 1 day at the root. **Done 2026-09-14** (§80): `record`
+      takes the transaction, 31 sites pass theirs, a scan refuses anything else
 - [x] **The second-factor reset has no rate limit.** Each call ends the target's
       sessions and sends mail. Under an hour. **Done 2026-09-14** (§79): three per
       target an hour, both routes on one budget
@@ -1197,6 +1199,116 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       `sales/commands.rs:46` (from both credit paths, as they stood then; §70
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
+
+### 81 · A suspension drains before it stops
+
+**Built 2026-09-14**, from the product owner's answer to the Road to selling
+decisions: drain the issued invoices and report them to ZATCA on suspension.
+The 2026-09-11 rule — nothing runs while suspended — stands for everything
+else, and the two rules meet in a state between them.
+
+#### Two halves
+
+`TenantStatus::Suspending` sits between `Active` and `Suspended`
+(`crates/erp-control/src/model.rs`). `suspend_tenant` moves a tenant there,
+with the reason and the instant staff wrote, and every door treats it as
+suspended: `is_enterable` is false, members and the public get
+`access.tenant_unavailable`, the owner still reads the audit trail, support
+still gets in. What differs is the worker. `claim_tenants` and `renew_lease`
+answer for `active` and `suspending`, so the tenant keeps being visited; the
+visit reads the status it was claimed under (`Visit::suspending`,
+`crates/erp-worker/src/worker.rs`) and runs only the jobs that say
+`drains_a_suspension()`. After a clean round it asks each of those `drained(db)`,
+and when every one answers yes it calls `ControlPlane::finish_suspension`, which
+moves `suspending` → `suspended` and records `tenant.suspension_complete` under
+the system's name. From there `claim_tenants` skips the tenant and
+`renew_lease` says stop, as before. A visit whose drain job failed — ZATCA
+down — leaves the tenant `suspending`, shut and retried, until a visit in which
+it does not. `reinstate_tenant` works from either half; `finish_suspension`
+answers `false` rather than an error for a tenant reinstated mid-drain, since
+the worker that asked simply has nothing to finish.
+
+#### What drains, and what "drained" means
+
+`Job` gained two methods (`crates/erp-worker/src/job.rs`), both defaulting to
+the answer that keeps every other job out: `drains_a_suspension` is `false` and
+`drained` is `true`. `SignZatcaDocuments` and `SubmitToZatca`
+(`crates/erp-worker/src/bin/worker.rs`) say `true`, and each answers `drained`
+from what its tick would find: `tax_sa::awaiting_signature` and
+`tax_sa::awaiting_submission` (`modules/tax_sa/src/submit.rs`) count the
+rows, and a tenant with rows but nothing to sign them with or nowhere to send
+them — one that never finished onboarding — counts as drained, because holding
+its suspension open would hold it for ever. Everything else — saved-card
+charges, reminders, projections, the outbox — stops from the moment staff act.
+
+#### The schema
+
+`0022_tenant_suspending.sql` widens `tenant_status_check` to admit
+`suspending` and `tenant_suspension_is_complete` to require the reason on both
+halves; both drop-and-add, exempted in `migrations/EXEMPTIONS` as widenings the
+previous build's writes all satisfy. `just prepare` regenerated `.sqlx` for the
+five queries whose text changed and the two new counts.
+
+#### Proved
+
+`a_tenant_being_suspended_runs_only_its_drain_jobs_and_is_suspended_once_drained`
+(`crates/erp-worker/tests/modules.rs`) runs a real worker against a suspended
+tenant with a kernel job and a fake drain job that reports three documents:
+the kernel job never ticks, the drain job empties, the tenant ends
+`suspended` with one `tenant.suspension_complete` on the record. Removing the
+job skip fails it on the first assertion; removing the flip fails it on the
+status. `a_suspended_tenant_is_not_visited_and_its_visit_stops`
+(`crates/erp-control/tests/leases.rs`) now proves a suspending tenant is
+claimed and kept, and a suspended one is neither; the three control-plane
+suspension tests cover both halves, the reinstatement from each, and that the
+reason survives the move. `docs/RUNNING.md`, the platform route documents and
+the control-plane chapter describe the two halves.
+
+### 80 · An audit entry commits with the change it records
+
+**Built 2026-09-14**, the first of the four larger Priority 1 items after §79.
+`ControlPlane::record` ran on the pool, after each caller's own commit, so a
+crash between the two left an act that stood — a tenant suspended, a key issued,
+a member removed — with no record that it had happened. No test could catch it:
+every test runs to completion.
+
+#### The root, not the sites
+
+`record` takes `&mut PgConnection` now (`crates/erp-control/src/lib.rs`), so an
+entry written outside the change's transaction stops compiling by accident
+rather than by review. Of the 33 callers: five already ran in a transaction and
+recorded after `commit` — `invite`, `reset_second_factor_by`, `move_staff`,
+`abandon`, `request_signup` — and now record before it; twenty-four ran a bare
+statement on the pool and then recorded, and each now opens a transaction around
+both. The three status moves go through `moved`, which takes the transaction
+the `UPDATE` ran on, records, commits, and only then forgets the entry cache — a
+forget before the commit could be refilled by a racing read with the old row.
+`dealt_with` (dead letters) takes its transaction the same way. Cache
+invalidation moved after every commit for that reason.
+
+**Two acts have no control-plane write of their own** and acquire a bare
+connection, saying `audit-only:` beside it with why: support entering a tenant
+(`enter_for_support`), where the entry is written before the door opens and a
+failure to write it keeps the door shut; and `signup.confirmed`, a summary of a
+build that is many transactions across two databases, each with its own entry.
+
+**Where one transaction cannot reach**, the record sits with the last
+control-plane write of the act: `issue_key_replacing` creates the identity and
+its membership as their own audited acts, then the authenticator, the key and
+`api_key.issued` commit together; `reap_demo` and `abandon` drop the tenant's
+database first, by design, and the row's deletion and its entry commit together
+after.
+
+#### The guard
+
+`an_audit_entry_is_written_on_the_transaction_of_its_change`
+(`crates/erp-control/tests/audit.rs`) scans the crate for every `.record(` and
+refuses one whose first argument is not `&mut *tx` unless an `audit-only:`
+comment sits within eight lines above it. It asserts thirty-plus sites, so a
+renamed call cannot pass it vacuously. Proved: breaking one marker fails it,
+restoring passes. The control-plane suite (224) and every audit-reading HTTP
+test (52) pass unchanged, which is the other half of the proof — nothing about
+what is recorded moved, only when.
 
 ### 79 · The stop-ship holes that were hours
 

@@ -356,18 +356,26 @@ tenant with dedicated hardware.
 exists, is migrated and is seeded, never before, or entry would succeed against a
 database with no schema.
 
-The three status moves — provisioning → active, active → suspended, suspended →
-active — each run `UPDATE … WHERE status = <where it starts>` and are judged in one
-private place, `moved`: no row changed is `WrongTenantStatus` naming the status
-the tenant is in (or `NoSuchTenant`), never an `Ok` that did nothing; a change is
-forgotten from the entry cache and recorded. **While a tenant is suspended nothing
-runs for it**: every door refuses it, `claim_tenants` skips it, and
-`renew_lease` answers `false` so a visit under way stops before its next job.
-Support can still open it, and the fleet migrator still brings its schema
-current. Sessions are not ended — they belong to people, who may work elsewhere.
-The reason is the `tenant_suspension_is_complete` constraint's business (1 to 500
-characters, and only on a suspended row); `SuspensionReason` is its refusal,
-named.
+The status moves — provisioning → active, active → suspending, suspending or
+suspended → active — each run `UPDATE … WHERE status = <where it starts>` and are
+judged in one private place, `moved`: no row changed is `WrongTenantStatus`
+naming the status the tenant is in (or `NoSuchTenant`), never an `Ok` that did
+nothing; a change is recorded in the same transaction, committed, and then
+forgotten from the entry cache. **A suspension drains before it stops** (decided
+2026-09-14): `suspend_tenant` moves a tenant to `suspending`, where every door
+refuses it but `claim_tenants` and `renew_lease` still answer, so the worker
+keeps visiting it for the jobs that sign and report its issued documents to
+ZATCA and no others. When every such job says it is drained the worker calls
+`finish_suspension`, which moves `suspending` → `suspended` and records
+`tenant.suspension_complete` under the system's name; from there nothing runs
+for it — `claim_tenants` skips it and `renew_lease` answers `false`, so a visit
+under way stops before its next job. `finish_suspension` answers `false`, not
+an error, for a tenant that is no longer suspending. Support can still open a
+tenant in either half, and the fleet migrator still brings its schema current.
+Sessions are not ended — they belong to people, who may work elsewhere. The
+reason is the `tenant_suspension_is_complete` constraint's business (1 to 500
+characters, on a suspending or suspended row and no other); `SuspensionReason`
+is its refusal, named.
 
 `enable_module` is idempotent, because the caller is usually a workflow that may
 be retried. `disable_module` **never drops the module's tables**. A tenant who

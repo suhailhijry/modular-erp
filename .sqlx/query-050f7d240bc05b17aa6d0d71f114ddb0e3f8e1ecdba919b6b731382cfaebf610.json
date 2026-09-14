@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE tenant\n               SET worker_lease_owner = $1,\n                   worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond'),\n                   next_visit_at      = now() + ($3::BIGINT * INTERVAL '1 millisecond')\n             WHERE id IN (\n                 SELECT id\n                   FROM tenant\n                  WHERE status = 'active'\n                    AND next_visit_at <= now()\n                    AND (worker_lease_until IS NULL OR worker_lease_until <= now())\n                  ORDER BY next_visit_at\n                  LIMIT $2\n                    FOR UPDATE SKIP LOCKED\n             )\n            RETURNING id as \"id: TenantId\", slug, display_name, status, cluster,\n                      database_name, demo_expires_at,\n                      requires_second_factor, created_at, idle_visits\n            ",
+  "query": "SELECT t.id, t.slug, t.display_name, t.status, t.cluster,\n                      t.database_name, t.demo_expires_at,\n                      t.requires_second_factor, t.created_at\n                 FROM tenant t\n                 JOIN entitlement e ON e.tenant_id = t.id\n                WHERE t.status IN ('active', 'suspending', 'suspended')\n                  AND e.module_id = $1\n                  AND e.disabled_at IS NULL\n                ORDER BY t.created_at",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id: TenantId",
+        "name": "id",
         "type_info": "Uuid",
         "origin": {
           "Table": {
@@ -101,24 +101,11 @@
             "name": "created_at"
           }
         }
-      },
-      {
-        "ordinal": 9,
-        "name": "idle_visits",
-        "type_info": "Int4",
-        "origin": {
-          "Table": {
-            "table": "tenant",
-            "name": "idle_visits"
-          }
-        }
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Int8",
-        "Int8"
+        "Text"
       ]
     },
     "nullable": [
@@ -130,9 +117,8 @@
       false,
       true,
       false,
-      false,
       false
     ]
   },
-  "hash": "88ea905aebcc338558a22178e6e0e66476af5ff1da670a4be8f0b58e42232ef9"
+  "hash": "050f7d240bc05b17aa6d0d71f114ddb0e3f8e1ecdba919b6b731382cfaebf610"
 }

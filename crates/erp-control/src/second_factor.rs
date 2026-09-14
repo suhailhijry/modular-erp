@@ -801,14 +801,8 @@ impl ControlPlane {
         erp_eventlog::enqueue(&mut tx, None, &[email.promised(format!("enrolment:{id}"))])
             .await
             .map_err(|e| AccessError::Corrupt(e.to_string()))?;
-        tx.commit().await.map_err(AccessError::Database)?;
-
-        // After the commit, for the reason `log_out` gives.
-        if let Some(shared) = &self.shared {
-            shared.forget_sessions_of(target).await;
-        }
-
         self.record(
+            &mut tx,
             actor,
             tenant,
             "second_factor.reset",
@@ -817,6 +811,12 @@ impl ControlPlane {
             detail,
         )
         .await?;
+        tx.commit().await.map_err(AccessError::Database)?;
+
+        // After the commit, for the reason `log_out` gives.
+        if let Some(shared) = &self.shared {
+            shared.forget_sessions_of(target).await;
+        }
         Ok(token)
     }
 

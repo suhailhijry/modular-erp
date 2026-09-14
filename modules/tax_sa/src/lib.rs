@@ -72,7 +72,10 @@ pub use projections::{
     projections,
 };
 pub use report::{Band, Return, Side, Sides, vat_return, vat_return_between};
-pub use submit::{SignedOff, SweepError, Swept, sign_pending, submit_pending};
+pub use submit::{
+    SignedOff, SweepError, Swept, awaiting_signature, awaiting_submission, sign_pending,
+    submit_pending,
+};
 pub use taxpayer::{Address, IdScheme, Registration, Taxpayer, TaxpayerEvent};
 
 use erp_i18n::StaticCatalog;

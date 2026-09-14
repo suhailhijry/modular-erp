@@ -1597,6 +1597,32 @@ impl erp_worker::Job for SignZatcaDocuments {
         Some(tax_sa::module_id())
     }
 
+    // A suspension drains this before it stops (decided 2026-09-14): a
+    // document issued while the tenant was active still gets its stamp.
+    fn drains_a_suspension(&self) -> bool {
+        true
+    }
+
+    async fn drained(&self, db: &erp_control::TenantDb) -> Result<bool, erp_worker::BoxError> {
+        let mut conn = db.read().await?;
+        let waiting = tax_sa::awaiting_signature(&mut conn).await?;
+        drop(conn);
+        if waiting == 0 {
+            return Ok(true);
+        }
+        // Nothing to sign with: a tenant that never finished onboarding has
+        // documents nobody can sign, and holding its suspension open would
+        // hold it for ever. `tick` reports the same rows as waiting for a
+        // certificate.
+        let signable = tax_sa::zatca::onboarding::production(db, &self.sealing)
+            .await?
+            .is_some()
+            && tax_sa::zatca::onboarding::private_key(db, &self.sealing)
+                .await?
+                .is_some();
+        Ok(!signable)
+    }
+
     async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
         let signed = tax_sa::sign_pending(
             db,
@@ -1645,6 +1671,27 @@ impl erp_worker::Job for SubmitToZatca {
 
     fn module(&self) -> Option<ModuleId> {
         Some(tax_sa::module_id())
+    }
+
+    // The other half of the drain: what was signed is reported before the
+    // tenant stops, so a suspension is never what makes an invoice late.
+    fn drains_a_suspension(&self) -> bool {
+        true
+    }
+
+    async fn drained(&self, db: &erp_control::TenantDb) -> Result<bool, erp_worker::BoxError> {
+        let mut conn = db.read().await?;
+        let waiting = tax_sa::awaiting_submission(&mut conn).await?;
+        drop(conn);
+        if waiting == 0 {
+            return Ok(true);
+        }
+        // Nowhere to send them: `tick` answers `Idle` for the same tenant.
+        let sendable = tax_sa::zatca::onboarding::production(db, &self.sealing)
+            .await?
+            .is_some()
+            && zatca_environment(db).await?.is_some();
+        Ok(!sendable)
     }
 
     async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {

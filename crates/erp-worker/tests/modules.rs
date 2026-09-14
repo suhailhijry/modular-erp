@@ -750,6 +750,128 @@ async fn a_tenant_is_visited_by_one_visit_at_a_time() {
     fixture.cleanup().await;
 }
 
+/// A job that stands in for ZATCA signing and reporting: it keeps running for
+/// a tenant being suspended, and says when nothing is left. Each tick reports
+/// one of `left` documents.
+struct Draining {
+    ticks: Arc<AtomicUsize>,
+    left: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Job for Draining {
+    fn name(&self) -> &'static str {
+        "draining"
+    }
+    fn drains_a_suspension(&self) -> bool {
+        true
+    }
+    async fn drained(&self, _db: &TenantDb) -> Result<bool, BoxError> {
+        Ok(self.left.load(Ordering::SeqCst) == 0)
+    }
+    async fn tick(&self, _db: &TenantDb) -> Result<Activity, BoxError> {
+        self.ticks.fetch_add(1, Ordering::SeqCst);
+        if self.left.load(Ordering::SeqCst) == 0 {
+            return Ok(Activity::Idle);
+        }
+        self.left.fetch_sub(1, Ordering::SeqCst);
+        Ok(Activity::Worked)
+    }
+}
+
+/// **A tenant being suspended runs only the jobs that drain it, and is
+/// suspended once they are drained** — decided 2026-09-14, so a suspension is
+/// never what makes a simplified invoice late. The ordinary job here is a
+/// kernel job that runs for every active tenant; that it never ticks is the
+/// skip. The drain job reports three documents and then finds nothing, and
+/// the worker moves the tenant on and stops claiming it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tenant_being_suspended_runs_only_its_drain_jobs_and_is_suspended_once_drained() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.tenant("closing").await;
+    fixture
+        .control
+        .suspend_tenant(tenant, "unpaid", Actor::system())
+        .await
+        .expect("suspends");
+
+    let ordinary = Arc::new(AtomicUsize::new(0));
+    let drain_ticks = Arc::new(AtomicUsize::new(0));
+    let left = Arc::new(AtomicUsize::new(3));
+    let worker = Worker::new(
+        Arc::clone(&fixture.control),
+        WorkerConfig {
+            name: "closer".to_owned(),
+            schedule: erp_control::WorkSchedule {
+                lease: Duration::from_secs(30),
+                idle_interval: Duration::from_millis(10),
+                jitter: Duration::ZERO,
+                max_idle_interval: Duration::from_secs(1),
+            },
+            empty_claim_pause: Duration::from_millis(2),
+            ..WorkerConfig::default()
+        },
+    )
+    .with_job(Arc::new(Counter {
+        module: None,
+        ticks: Arc::clone(&ordinary),
+    }))
+    .with_job(Arc::new(Draining {
+        ticks: Arc::clone(&drain_ticks),
+        left: Arc::clone(&left),
+    }));
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let run = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move { worker.run(cancel).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    cancel.cancel();
+    let shutdown = run.await.expect("joins");
+    assert_eq!(shutdown.failed_visits, 0);
+
+    assert_eq!(
+        ordinary.load(Ordering::SeqCst),
+        0,
+        "an ordinary job ran for a tenant being suspended"
+    );
+    assert!(
+        drain_ticks.load(Ordering::SeqCst) >= 3,
+        "the drain job ticked {} times; it did not report the documents",
+        drain_ticks.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        left.load(Ordering::SeqCst),
+        0,
+        "documents were left unreported"
+    );
+
+    let status = fixture
+        .control
+        .tenant(tenant)
+        .await
+        .expect("reads")
+        .expect("exists")
+        .status;
+    assert_eq!(
+        status,
+        erp_control::TenantStatus::Suspended,
+        "the drain finished and the tenant was not moved on"
+    );
+    let completed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_entry
+          WHERE action = 'tenant.suspension_complete' AND subject_id = $1",
+    )
+    .bind(tenant.to_string())
+    .fetch_one(fixture.control.pool())
+    .await
+    .expect("reads");
+    assert_eq!(completed, 1, "the completion is on the record, once");
+
+    fixture.cleanup().await;
+}
+
 struct AlwaysFails;
 
 #[async_trait::async_trait]

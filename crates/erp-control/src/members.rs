@@ -184,6 +184,7 @@ impl ControlPlane {
             return Err(MemberError::LastOwner);
         }
 
+        let mut tx = self.pool.begin().await.map_err(AccessError::Database)?;
         let changed = sqlx::query!(
             "UPDATE membership SET role = $3
               WHERE tenant_id = $1 AND identity_id = $2 AND revoked_at IS NULL",
@@ -191,7 +192,7 @@ impl ControlPlane {
             identity.as_uuid(),
             role.as_str(),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(AccessError::Database)?
         .rows_affected();
@@ -200,15 +201,8 @@ impl ControlPlane {
             return Err(MemberError::NotAMember);
         }
 
-        // Now, not after the TTL: a demotion that takes five seconds to apply is
-        // five seconds of someone doing what they were just told they cannot.
-        self.forget(crate::shared::Invalidate::Membership {
-            identity,
-            tenant: tenant_id,
-        })
-        .await;
-
         self.record(
+            &mut tx,
             actor,
             Some(tenant_id),
             "membership.role_changed",
@@ -217,6 +211,15 @@ impl ControlPlane {
             serde_json::json!({ "tenant": tenant_id.to_string(), "role": role.as_str() }),
         )
         .await?;
+        tx.commit().await.map_err(AccessError::Database)?;
+
+        // Now, not after the TTL: a demotion that takes five seconds to apply is
+        // five seconds of someone doing what they were just told they cannot.
+        self.forget(crate::shared::Invalidate::Membership {
+            identity,
+            tenant: tenant_id,
+        })
+        .await;
         Ok(())
     }
 
@@ -263,6 +266,7 @@ impl ControlPlane {
         .map_err(AccessError::Database)?
         .ok_or(MemberError::NotAMember)?;
 
+        let mut tx = self.pool.begin().await.map_err(AccessError::Database)?;
         match role {
             Some(role) => {
                 sqlx::query!(
@@ -274,7 +278,7 @@ impl ControlPlane {
                     module.as_str(),
                     role.as_str(),
                 )
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(AccessError::Database)?;
             }
@@ -285,22 +289,14 @@ impl ControlPlane {
                     membership,
                     module.as_str(),
                 )
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(AccessError::Database)?;
             }
         }
 
-        // Now, not after the TTL — same reason a demotion is invalidated at
-        // once: the seconds in between are seconds of somebody doing what they
-        // have just been told they cannot.
-        self.forget(crate::shared::Invalidate::Membership {
-            identity,
-            tenant: tenant_id,
-        })
-        .await;
-
         self.record(
+            &mut tx,
             actor,
             Some(tenant_id),
             "membership.module_role_changed",
@@ -313,6 +309,16 @@ impl ControlPlane {
             }),
         )
         .await?;
+        tx.commit().await.map_err(AccessError::Database)?;
+
+        // Now, not after the TTL — same reason a demotion is invalidated at
+        // once: the seconds in between are seconds of somebody doing what they
+        // have just been told they cannot.
+        self.forget(crate::shared::Invalidate::Membership {
+            identity,
+            tenant: tenant_id,
+        })
+        .await;
         Ok(())
     }
 

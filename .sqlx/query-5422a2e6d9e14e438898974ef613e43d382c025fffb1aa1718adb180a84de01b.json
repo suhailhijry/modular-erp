@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tenant\n                SET worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond'),\n                    next_visit_at      = now() + ($3::BIGINT * INTERVAL '1 millisecond')\n              WHERE id = $1\n                AND worker_lease_owner = $2\n                AND worker_lease_until > now()\n                AND status IN ('active', 'suspending')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5422a2e6d9e14e438898974ef613e43d382c025fffb1aa1718adb180a84de01b"
+}

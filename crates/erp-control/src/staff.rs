@@ -408,12 +408,6 @@ impl ControlPlane {
             .await
             .map_err(AccessError::from)?,
         };
-        tx.commit().await.map_err(AccessError::from)?;
-
-        // Now, not after the TTL: a revoked superadmin keeping the keys for
-        // five seconds is five seconds of exactly what was just taken away.
-        self.forget(crate::shared::Invalidate::Platform(identity))
-            .await;
 
         let (action, detail) = match to {
             Some(role) => (
@@ -427,6 +421,7 @@ impl ControlPlane {
             ),
         };
         self.record(
+            &mut tx,
             actor,
             None,
             action,
@@ -435,6 +430,12 @@ impl ControlPlane {
             detail,
         )
         .await?;
+        tx.commit().await.map_err(AccessError::from)?;
+
+        // Now, not after the TTL: a revoked superadmin keeping the keys for
+        // five seconds is five seconds of exactly what was just taken away.
+        self.forget(crate::shared::Invalidate::Platform(identity))
+            .await;
         Ok(())
     }
 }

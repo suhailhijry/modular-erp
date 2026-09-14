@@ -52,6 +52,30 @@ pub trait Job: Send + Sync + 'static {
         None
     }
 
+    /// **Whether this job keeps running for a tenant being suspended.**
+    ///
+    /// A suspension has two halves (decided 2026-09-14): `suspending` shuts
+    /// every door but keeps the worker visiting for the jobs that say `true`
+    /// here — signing and reporting issued documents to ZATCA, whose 24-hour
+    /// window a suspension must not be what breaks — and `suspended`, which
+    /// nothing runs for. Every other job answers `false`, the default, and is
+    /// skipped from the moment staff act: a saved-card charge or a booking
+    /// reminder for a tenant being suspended is exactly what the suspension
+    /// exists to stop.
+    fn drains_a_suspension(&self) -> bool {
+        false
+    }
+
+    /// **Whether nothing is left for this job to do for a tenant being
+    /// suspended.** Asked only of jobs that drain one, after a visit's ticks;
+    /// when every one answers `true` the worker moves the tenant to
+    /// `suspended`. "Nothing left" includes nothing this job *could* do — a
+    /// tenant that never finished onboarding has documents nobody can sign,
+    /// and holding its suspension open would hold it for ever.
+    async fn drained(&self, _db: &TenantDb) -> Result<bool, BoxError> {
+        Ok(true)
+    }
+
     /// Does a bounded amount of work for one tenant.
     async fn tick(&self, db: &TenantDb) -> Result<Activity, BoxError>;
 }

@@ -59,11 +59,18 @@ impl Identity {
 /// `Provisioning` is a real state, not a transient one: signup returns
 /// immediately and the provisioner works in the background, so a tenant is
 /// visible-but-not-yet-enterable for a few seconds.
+///
+/// `Suspending` is the first half of a suspension (decided 2026-09-14): every
+/// door is shut as for `Suspended`, but the worker keeps visiting for the jobs
+/// that sign and report the tenant's issued documents to ZATCA, and moves it
+/// to `Suspended` once nothing is left for them — a simplified invoice has 24
+/// hours to be reported, and a suspension must not be what makes it late.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantStatus {
     Provisioning,
     Active,
+    Suspending,
     Suspended,
     Deleted,
 }
@@ -75,9 +82,17 @@ impl TenantStatus {
         match self {
             Self::Provisioning => "provisioning",
             Self::Active => "active",
+            Self::Suspending => "suspending",
             Self::Suspended => "suspended",
             Self::Deleted => "deleted",
         }
+    }
+
+    /// Whether the worker visits a tenant in this state: active ones for
+    /// everything, and ones being suspended for the drain jobs only.
+    #[must_use]
+    pub const fn is_visited(self) -> bool {
+        matches!(self, Self::Active | Self::Suspending)
     }
 }
 
@@ -226,6 +241,7 @@ mod tests {
         assert!(base.is_enterable());
         for status in [
             TenantStatus::Provisioning,
+            TenantStatus::Suspending,
             TenantStatus::Suspended,
             TenantStatus::Deleted,
         ] {

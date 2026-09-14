@@ -72,6 +72,35 @@ impl From<CommandError<TaxError>> for SweepError {
     }
 }
 
+/// **How many documents are built and not yet signed.** What the worker asks
+/// before it lets a tenant's suspension complete: a suspension drains signing
+/// and reporting first, and this is the first half of "nothing left".
+///
+/// # Errors
+/// If the database does.
+pub async fn awaiting_signature(conn: &mut sqlx::PgConnection) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"SELECT count(*) as "count!" FROM proj_tax_sa.zatca_document
+            WHERE status = 'pending' AND signed_xml IS NULL"#
+    )
+    .fetch_one(&mut *conn)
+    .await
+}
+
+/// **How many are signed and not yet answered by ZATCA.** The other half of
+/// that question — the same rows [`pending`] hands to a submitting sweep.
+///
+/// # Errors
+/// If the database does.
+pub async fn awaiting_submission(conn: &mut sqlx::PgConnection) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"SELECT count(*) as "count!" FROM proj_tax_sa.zatca_document
+            WHERE status = 'pending' AND signed_xml IS NOT NULL AND invoice_hash IS NOT NULL"#
+    )
+    .fetch_one(&mut *conn)
+    .await
+}
+
 /// What one signing sweep did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SignedOff {

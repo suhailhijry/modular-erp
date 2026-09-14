@@ -203,6 +203,10 @@ impl Worker {
                     // The backoff is computed from it, which is what makes a
                     // dormant tenant nearly free — see `WorkSchedule`.
                     idle_visits: claim.idle_visits,
+                    // Read at the claim, once: a tenant suspended mid-visit is
+                    // stopped by `renew_lease`, and one that becomes
+                    // `suspending` mid-visit finishes this visit as it began.
+                    suspending: claim.tenant.status == erp_control::TenantStatus::Suspending,
                     cancel: cancel.clone(),
                 };
                 let failures = Arc::clone(&failures);
@@ -312,6 +316,11 @@ struct Visit {
     owner: String,
     tenant: TenantId,
     idle_visits: i32,
+    /// **The tenant is being suspended.** Only the jobs that drain a
+    /// suspension run, and once every one of them says it is drained the
+    /// visit moves the tenant to `suspended` — after which it is never
+    /// claimed again.
+    suspending: bool,
     cancel: CancellationToken,
 }
 
@@ -342,8 +351,51 @@ impl Visit {
             // else may be working on.
             return false;
         }
+        // Only after a clean round: a drain job that failed — ZATCA down —
+        // has not said its documents are reported, and the tenant stays
+        // `suspending` until a visit in which it does.
+        if self.suspending && !failed {
+            self.finish_if_drained(&db).await;
+        }
         self.reschedule(worked).await;
         !failed
+    }
+
+    /// Moves a `suspending` tenant to `suspended` once every drain job has
+    /// nothing left. Asked after the ticks, so a job's own answer is about the
+    /// rows its last tick left.
+    async fn finish_if_drained(&self, db: &TenantDb) {
+        for job in self.jobs.iter() {
+            if !job.drains_a_suspension() || job.module().is_some_and(|m| !db.has_module(&m)) {
+                continue;
+            }
+            match job.drained(db).await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(e) => {
+                    tracing::warn!(
+                        tenant = %self.tenant,
+                        job = job.name(),
+                        error = %e,
+                        "could not tell whether the drain is finished; the tenant stays suspending"
+                    );
+                    return;
+                }
+            }
+        }
+        match self.control.finish_suspension(self.tenant).await {
+            Ok(true) => tracing::info!(
+                tenant = %self.tenant,
+                "drained; the suspension is complete and nothing runs for it now"
+            ),
+            // Reinstated while draining, or finished by another visit.
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                tenant = %self.tenant,
+                error = %e,
+                "could not complete the suspension; the next visit will"
+            ),
+        }
     }
 
     /// Extends the lease before a job runs, and says whether it is still ours.
@@ -408,6 +460,12 @@ impl Visit {
 
                 // A module this tenant declined costs it nothing.
                 if job.module().is_some_and(|m| !db.has_module(&m)) {
+                    continue;
+                }
+                // A tenant being suspended gets only the jobs that drain one:
+                // its documents are still signed and reported; nothing else
+                // runs for it from the moment staff acted.
+                if self.suspending && !job.drains_a_suspension() {
                     continue;
                 }
 
