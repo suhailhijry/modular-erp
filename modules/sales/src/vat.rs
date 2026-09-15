@@ -646,3 +646,37 @@ mod tests {
         assert_eq!(absurd.on(money(i64::MAX)), Err(TaxError::OutOfRange));
     }
 }
+
+/// **The currency a tax document must be issued in**, when the jurisdiction
+/// says so.
+///
+/// Saudi Arabia does: the tax on an e-invoice is stated in riyals whatever the
+/// invoice is in, and this build cannot state a riyal tax amount for a dollar
+/// invoice — FX was deferred on 2026-09-15, to be handled by the business. So
+/// `tax_sa` seeds this at install and [`issue_in`](crate::issue_in) refuses a
+/// document in any other currency, which turns a quiet compliance gap into a
+/// refusal. A tenant with no tax module set has no rule and issues in what it
+/// likes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentCurrency {
+    pub currency: CurrencyCode,
+}
+
+impl DocumentCurrency {
+    /// Where the jurisdiction's module stores it. `tax.` rather than `sales.`
+    /// because it is the tax authority's rule, and every module that issues a
+    /// document the authority sees reads the same key.
+    pub const KEY: &'static str = "tax.document_currency";
+
+    /// The rule this tenant is under, or none.
+    ///
+    /// # Errors
+    /// If the stored value cannot be read.
+    pub async fn resolve(
+        conn: &mut sqlx::PgConnection,
+    ) -> Result<Option<Self>, erp_eventlog::ConfigError> {
+        Ok(erp_eventlog::configuration::get::<Self>(conn, Self::KEY)
+            .await?
+            .map(|configured| configured.value))
+    }
+}

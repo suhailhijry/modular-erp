@@ -26,11 +26,12 @@ on good grounds — the WPS file below being the sharpest case, where guessing a
 an unverifiable specification is the *worst* available option and two other
 documents said so while this one did not.
 
-**Where this stands:** 1,780 tests as of 2026-09-14 — 1,779 green, clippy, fmt and `cargo deny`
+**Where this stands:** 1,783 tests as of 2026-09-15 — 1,782 green, clippy, fmt and `cargo deny`
 clean; the one red is the `/v1` compatibility guard on the decided removal of
 `PUT /v1/ledger/books`, waiting on `just baseline`. **Priority 1 of
 [Road to selling](#road-to-selling) is complete** (§79–§83), and Priority 2 has begun with the
-statements on the fiscal calendar and the period close (§84–§85). The per-phase test
+statements on the fiscal calendar, the period close, and FX deferred behind a
+riyals-only rule for tax documents (§84–§86). The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end, and what blocks selling
@@ -146,6 +147,17 @@ drift with every change.
   The calendar becomes **segments**: a new one starts on a fiscal-year boundary
   of the last, in open time; closed years keep the periods they were closed
   under; no short transition years yet.
+- **FX is deferred** (decided 2026-09-15). The business handles its foreign
+  currency itself: the ledger keeps per-currency books, a tenant that converts
+  on receipt records riyals, one that keeps dollars keeps a dollar book beside.
+  The provider, the functional currency, translated statements and revaluation
+  are dropped from Priority 2 to *when a tenant asks*; the first thing asked
+  for will be the exchange itself — one entry with two currency legs at a stated
+  rate — which needs a functional currency to balance against and no provider.
+  **The one thing not left to the business:** a Saudi tax document must be in
+  riyals, because ZATCA states the tax in riyals and this build cannot state a
+  riyal tax amount for a dollar invoice — `tax_sa` seeds the rule, `sales`
+  refuses (§86).
 
 ### Waiting on the product owner
 
@@ -244,7 +256,8 @@ drift with every change.
       **Order:** statements on the calendar (~2 weeks) → formal closure (~1) →
       FX levels i and ii (~2–3) → cost centers (~1–2) → revaluation (~1).
       **Statements on the calendar built 2026-09-14 (§84), the formal closure
-      the same night (§85)**; FX levels i and ii are next
+      the same night (§85); FX deferred 2026-09-15 (Decided above, §86)**;
+      cost centers are next, revaluation goes with FX
 - [ ] **Receipts and invoices a customer can hold.** A till sale's response carries
       no QR, and the full nine-field QR exists only after the worker signs; a B2B
       invoice is not held back until ZATCA clears it, and handing one over uncleared
@@ -382,6 +395,12 @@ drift with every change.
 
 ### Priority 6 · Later phases
 
+- [ ] **FX, when a tenant asks** (deferred 2026-09-15, §86). First the exchange
+      itself — one entry with two currency legs at a stated rate, the difference
+      to an FX account — which needs a functional currency on the tenant and
+      per-line amounts in it; then translated statements; a rate provider and
+      revaluation last, if ever. Until then the business keeps per-currency
+      books and Saudi tax documents are riyals only
 - [ ] Property (Phase 20). The party-model plan must be updated for read-model
       versions (§65) before it is followed
 - [ ] Marketing (Phase 18)
@@ -1283,6 +1302,38 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
 
+### 86 · FX is deferred, and a Saudi tax document is in riyals
+
+**Decided 2026-09-15.** The FX ladder — provider, functional currency, translated
+statements, cross-currency entries, revaluation — was built for a case this
+market barely has: the riyal is pegged to the dollar, most tenants are
+riyal-only, and the ones that touch dollars already know what they did with
+them. It is deferred to *when a tenant asks*, and what they will ask for first
+is the exchange itself (one entry, two currency legs, a stated rate), which
+needs a functional currency and no provider. What the ledger promises meanwhile
+is exact: per-currency books and per-currency statements; a tenant that
+converts on receipt records riyals; one that keeps dollars keeps a dollar book
+beside; the gain or loss on an exchange has nowhere to go and sits in a clearing
+account per currency until then.
+
+**The one thing not left to the business.** ZATCA states the tax on an
+e-invoice in riyals whatever the invoice is in. `sales` let an invoice be in any
+currency, the VAT return sums per currency, and `tax_sa` has no riyal tax amount
+for a dollar document — a compliance hole, quiet. Now `tax_sa` **seeds**
+`tax.document_currency = SAR` (`schema/seed.sql`, `DO NOTHING`, so a tenant's
+own value survives a re-install like the rate does) and `sales::issue_in` reads
+`sales::DocumentCurrency` in the issuing transaction and refuses any other
+currency — 422 `sales.document_currency` naming both — before anything is
+written. Every document ZATCA sees is issued through `issue_in` (the till's
+included), so the one check covers them; a credit note takes its invoice's
+currency. A tenant under no tax module has no rule.
+
+**Guards, both falsified:** the check removed → the sales and HTTP tests fail;
+the seed removed → the tax module's and the HTTP tests fail. Three tests: the
+sales module (refused before anything is written, riyals still issue), `tax_sa`
+(seeded at install, a tenant's dirhams survive a re-install), HTTP (a Saudi
+tenant's dollar invoice is a 422 naming both currencies, the riyal one a 201).
+
 ### 85 · A period closes in order, and a year books into retained earnings
 
 **Built 2026-09-14**, the second Priority 2 item, from eight decisions taken
@@ -1355,8 +1406,8 @@ the entry's lines and date, reopen order, a second booking's fresh ids, the
 later-year hold, the read-model check; the HTTP test drives the routes and the
 calendar's new segment on a 4-4-5 → monthly switch.
 
-**Not done here, by the decided order:** FX (levels i and ii), cost centers,
-revaluation with the close.
+**Not done here:** cost centers, next by the decided order. FX and the
+revaluation that went with it were deferred the next morning (§86).
 
 ### 84 · Statements are read by the tenant's fiscal calendar
 

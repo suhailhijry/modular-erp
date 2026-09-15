@@ -125,7 +125,7 @@ balance checkable per currency.
 
 ```rust
 pub enum JournalEntryEvent {
-    Posted { occurred_on: Timestamp, memo: String, lines: BalancedLines },
+    Posted { occurred_on: Timestamp, memo: String, lines: BalancedLines, closing: bool },
     Reversed { by: String, occurred_on: Timestamp },
 }
 impl JournalEntryEvent {
@@ -540,8 +540,10 @@ Every figure is a sum over `posting` at the moment it is asked, never a
 maintained total — the same argument the balance views make — and every range is
 exclusive at the far end, the convention the VAT return and `closed_before` use.
 **One statement per currency**: postings carry a currency and nothing here
-converts, so a tenant with riyal and dollar postings gets two of each; converting
-to a functional currency is FX's, which comes next.
+converts, so a tenant with riyal and dollar postings gets two of each. Converting
+to one currency was **deferred on 2026-09-15**: the business handles its foreign
+currency itself, and the one place that could not be left to it — a Saudi tax
+document — must be in riyals (`sales::DocumentCurrency`).
 
 The balance sheet carries two equity lines no account holds: the trading result
 since the fiscal year started, and the result of every year before it. Neither
@@ -561,5 +563,7 @@ touches, and by branch.
 ## What is deliberately absent
 
 Drafts, and posting rules driven by configuration. Each is real, and each needs
-somebody to want it before its shape is decided. Fiscal periods, FX and cost
-centers were wanted on 2026-09-14 and are being built in that order.
+somebody to want it before its shape is decided. Fiscal periods and the close
+were wanted on 2026-09-14 and are built; cost centers are next. FX was wanted
+and then deferred on 2026-09-15 — per-currency books, the exchange itself left
+to the business — until a tenant asks for the gain or loss on it.

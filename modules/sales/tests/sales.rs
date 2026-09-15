@@ -6921,3 +6921,76 @@ async fn a_serial_return_names_only_what_the_invoice_sold_and_only_once() {
 
     fixture.cleanup().await;
 }
+
+/// **A tax document is issued in the jurisdiction's currency.** Once the tax
+/// module has said which (`tax.document_currency` — Saudi Arabia says riyals),
+/// a dollar invoice is refused before anything is written, because this build
+/// cannot state the riyal tax on it. A tenant under no such rule issues in
+/// what it likes.
+#[tokio::test]
+async fn a_tax_document_is_issued_in_the_jurisdictions_currency() {
+    let fixture = Fixture::new().await;
+    let mut dollars = draft(vec![line(
+        "Consulting",
+        Money::from_minor(10_000, usd()),
+        VatCategory::Standard,
+    )]);
+    dollars.currency = usd();
+
+    // No rule: dollars are fine (the limit judges them, not the currency).
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    assert_eq!(
+        sales::DocumentCurrency::resolve(&mut conn)
+            .await
+            .expect("reads"),
+        None
+    );
+    erp_eventlog::configuration::set(
+        &mut conn,
+        sales::DocumentCurrency::KEY,
+        &sales::DocumentCurrency { currency: sar() },
+        Some("module:tax_sa"),
+        None,
+    )
+    .await
+    .expect("the tax module's rule");
+    drop(conn);
+
+    let refused = issue_invoice(
+        &fixture.db,
+        &code("INV-USD"),
+        &dollars,
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
+    .expect_err("a dollar invoice under a riyal rule");
+    assert!(
+        matches!(
+            rejection(&refused),
+            Some(SalesError::DocumentCurrency { expected, found })
+                if *expected == sar() && *found == usd()
+        ),
+        "{refused:?}"
+    );
+    // The riyal one it was always going to accept.
+    issue_on(
+        &fixture,
+        "INV-SAR",
+        "2026-03-01",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("riyals are what the rule asks for");
+
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let issued = sales::invoices(&mut conn, 100, None)
+        .await
+        .expect("reads")
+        .items;
+    assert_eq!(issued.len(), 1, "the refused invoice left nothing behind");
+    drop(conn);
+
+    fixture.cleanup().await;
+}

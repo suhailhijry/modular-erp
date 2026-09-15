@@ -8,6 +8,8 @@ pub const NO_EXEMPTION_REASON: MessageCode = MessageCode::new("sales.no_exemptio
 pub const NOT_ISSUED: MessageCode = MessageCode::new("sales.not_issued");
 pub const OVERPAYMENT: MessageCode = MessageCode::new("sales.overpayment");
 pub const PAYMENT_CURRENCY: MessageCode = MessageCode::new("sales.payment_currency");
+/// A tax document in a currency the jurisdiction does not take. 422.
+pub const DOCUMENT_CURRENCY: MessageCode = MessageCode::new("sales.document_currency");
 pub const NOT_A_PAYMENT: MessageCode = MessageCode::new("sales.not_a_payment");
 pub const ALREADY_CANCELLED: MessageCode = MessageCode::new("sales.already_cancelled");
 pub const HAS_PAYMENTS: MessageCode = MessageCode::new("sales.has_payments");
@@ -45,6 +47,7 @@ pub const DOCUMENT_LIMIT_NOT_POSITIVE: MessageCode =
 
 pub static CODES: &[MessageCode] = &[
     NOT_APPROVED,
+    DOCUMENT_CURRENCY,
     OVER_DOCUMENT_LIMIT,
     DOCUMENT_LIMIT_CURRENCY,
     DOCUMENT_LIMIT_NOT_POSITIVE,
@@ -435,6 +438,22 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Locale::Arabic,
         Template::Simple(
             "يجب أن يكون حد المستند الواحد أكبر من الصفر، و{limit} ليس كذلك. أرسل null لإلغاء الحد.",
+        ),
+    ),
+    (
+        DOCUMENT_CURRENCY,
+        Locale::English,
+        Template::Simple(
+            "Tax documents here are issued in {expected}; this one is in {found}. Issue it in \
+             {expected}, or keep the foreign-currency side in your own books.",
+        ),
+    ),
+    (
+        DOCUMENT_CURRENCY,
+        Locale::Arabic,
+        Template::Simple(
+            "المستندات الضريبية هنا تصدر بعملة {expected}، وهذا المستند بعملة {found}. أصدره \
+             بعملة {expected}، أو أمسك جانب العملة الأجنبية في دفاترك.",
         ),
     ),
 ];

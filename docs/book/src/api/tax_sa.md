@@ -16,7 +16,9 @@ None of that belongs in `ledger`, which is the accounting kernel every country
 uses, and none of it belongs in `sales`, which knows what an invoice is and not
 where it was issued. So `ledger` owns the *shape*, that a line has a treatment
 and a rate, and this module owns the *values*: it seeds `ledger::Rates` when a
-tenant enables it, and it holds ZATCA.
+tenant enables it — and, since 2026-09-15, `sales::DocumentCurrency` (riyals),
+so a dollar tax invoice is refused rather than reported with a tax amount ZATCA
+cannot read — and it holds ZATCA.
 
 ## Why the return moved here from erp-api
 

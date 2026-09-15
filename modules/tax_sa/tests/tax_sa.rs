@@ -2815,3 +2815,41 @@ async fn passed_checks_are_not_resent_when_going_live_fails() {
 
     fixture.cleanup().await;
 }
+
+/// **Enabling the module tells sales which currency tax documents are in** —
+/// riyals — and a re-install never overwrites what a tenant set, the same
+/// promise the rate makes.
+#[tokio::test]
+async fn installing_the_module_declares_the_document_currency() {
+    let fixture = Fixture::new().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    let declared = sales::DocumentCurrency::resolve(&mut conn)
+        .await
+        .expect("reads")
+        .expect("seeded at install");
+    assert_eq!(declared.currency, sar());
+
+    let dirhams = CurrencyCode::new("AED").expect("valid");
+    erp_eventlog::configuration::set(
+        &mut conn,
+        sales::DocumentCurrency::KEY,
+        &sales::DocumentCurrency { currency: dirhams },
+        Some("the-accountant"),
+        None,
+    )
+    .await
+    .expect("sets");
+    tax_sa::install(&mut conn).await.expect("installs again");
+    let kept = sales::DocumentCurrency::resolve(&mut conn)
+        .await
+        .expect("reads")
+        .expect("still set");
+    drop(conn);
+    assert_eq!(
+        kept.currency, dirhams,
+        "the module overwrote a tenant's rule"
+    );
+
+    fixture.cleanup().await;
+}

@@ -376,6 +376,14 @@ limit and the amount — when its total on the chosen basis is more than the
 limit. Equal is within it. A document in another currency than the limit's
 cannot be compared, and is refused (`sales.document_limit_currency`).
 
+**A tax document is issued in the jurisdiction's currency.** `DocumentCurrency`
+under `tax.document_currency`, seeded by the country's tax module — `tax_sa`
+says riyals — and read in `issue_in` with everything else the document is judged
+by. A dollar invoice under it is refused (`sales.document_currency`, 422) before
+anything is written: ZATCA states the tax in riyals whatever the invoice is in,
+and with FX deferred (2026-09-15) this build cannot state a riyal tax amount for
+a dollar document. A tenant under no tax module has no rule.
+
 It is judged **inside the command**, after the totals exist and in the same
 transaction: in `issue_in` on what the invoice charges (after its discounts and
 any deposit deducted), in the two credit-note roots on what the note credits, and

@@ -1717,7 +1717,8 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
                 SalesError::NotIssued(_)
                 | SalesError::Ledger(_)
                 | SalesError::HasPayments(_)
-                | SalesError::NoSuchCustomer(_) => StatusCode::UNPROCESSABLE_ENTITY,
+                | SalesError::NoSuchCustomer(_)
+                | SalesError::DocumentCurrency { .. } => StatusCode::UNPROCESSABLE_ENTITY,
                 // **A line of the wrong shape**, decided in one place the till
                 // asks too, so the two doors cannot answer it differently.
                 refused if refused.is_malformed() => StatusCode::BAD_REQUEST,

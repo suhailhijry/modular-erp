@@ -58,7 +58,9 @@ pub use projections::{
     PaymentRow, Sales, TaxRow, UnmatchedCustomer, VatBand, VatReturn, bands_of, credit_notes,
     invoice, invoices, overpaid, projections, receivables, unmatched_customers, vat_return,
 };
-pub use vat::{Prepaid, PrepaidError, TaxBand, TaxError, Totals, Vat, VatCategory, total};
+pub use vat::{
+    DocumentCurrency, Prepaid, PrepaidError, TaxBand, TaxError, Totals, Vat, VatCategory, total,
+};
 
 use erp_i18n::StaticCatalog;
 use erp_types::{DomainName, EventName, SchemaVersion};

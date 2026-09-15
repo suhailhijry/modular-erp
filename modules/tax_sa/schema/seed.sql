@@ -21,3 +21,18 @@ VALUES (
     'module:tax_sa'
 )
 ON CONFLICT (key) DO NOTHING;
+
+-- **The currency a tax document is issued in.**
+--
+-- ZATCA states the tax on an e-invoice in riyals whatever the invoice is in,
+-- and this build cannot state a riyal tax amount for a dollar invoice (FX was
+-- deferred on 2026-09-15). `sales::issue_in` reads this key and refuses any
+-- other currency. `DO NOTHING` for the same reason as above.
+INSERT INTO public.configuration (key, value, version, set_by)
+VALUES (
+    'tax.document_currency',
+    '{"currency":"SAR"}'::jsonb,
+    nextval('public.configuration_version'),
+    'module:tax_sa'
+)
+ON CONFLICT (key) DO NOTHING;

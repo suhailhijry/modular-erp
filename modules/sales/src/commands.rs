@@ -114,6 +114,13 @@ pub enum SalesError {
     Overpayment { outstanding: Money, offered: Money },
     #[error("the business holds only {held}; the refund is {offered}")]
     Overrefund { held: Money, offered: Money },
+    /// **A tax document in a currency the jurisdiction does not take.** See
+    /// [`DocumentCurrency`](crate::DocumentCurrency).
+    #[error("tax documents here are issued in {expected}; this one is in {found}")]
+    DocumentCurrency {
+        expected: CurrencyCode,
+        found: CurrencyCode,
+    },
     #[error("the invoice is in {expected} and the payment is in {found}")]
     PaymentCurrency {
         expected: CurrencyCode,
@@ -242,6 +249,9 @@ impl erp_i18n::Localize for SalesError {
             Self::Overrefund { held, offered } => Message::new(messages::OVERREFUND)
                 .with("held", MessageArg::text(held.to_string()))
                 .with("offered", MessageArg::text(offered.to_string())),
+            Self::DocumentCurrency { expected, found } => Message::new(messages::DOCUMENT_CURRENCY)
+                .with("expected", MessageArg::text(expected.to_string()))
+                .with("found", MessageArg::text(found.to_string())),
             Self::PaymentCurrency { expected, found } => Message::new(messages::PAYMENT_CURRENCY)
                 .with("expected", MessageArg::text(expected.to_string()))
                 .with("found", MessageArg::text(found.to_string())),
@@ -423,6 +433,27 @@ pub async fn issue_invoice(
     Err(contended(id))
 }
 
+/// **The currency the tax authority takes documents in**, when this tenant is
+/// under one — see [`DocumentCurrency`](crate::DocumentCurrency). Read in the
+/// issuing transaction with everything else the document is judged by, so a
+/// rule set a moment ago refuses the next invoice and not the one after it.
+async fn in_the_document_currency(
+    conn: &mut sqlx::PgConnection,
+    currency: CurrencyCode,
+) -> Result<(), ExecuteError<SalesError>> {
+    if let Some(required) = crate::DocumentCurrency::resolve(conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(SalesError::Config(e)))?
+        && required.currency != currency
+    {
+        return Err(ExecuteError::Rejected(SalesError::DocumentCurrency {
+            expected: required.currency,
+            found: currency,
+        }));
+    }
+    Ok(())
+}
+
 /// One attempt at issuing: the invoice event and its journal entry, in the
 /// caller's transaction.
 ///
@@ -469,6 +500,8 @@ pub async fn issue_in(
             customer.to_string(),
         )));
     }
+
+    in_the_document_currency(&mut *conn, draft.currency).await?;
 
     // **The rate, in this transaction too.** It used to be a constant the API
     // handler stamped onto each line before the command ran; it is now the

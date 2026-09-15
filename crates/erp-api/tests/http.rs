@@ -1716,6 +1716,47 @@ async fn statements_are_read_by_the_fiscal_calendar() {
     fixture.cleanup().await;
 }
 
+/// **A Saudi tenant issues tax invoices in riyals.** Enabling `tax_sa` seeds
+/// the rule and a dollar invoice is a 422 naming both currencies — the
+/// compliance gap FX's deferral would otherwise have left quiet.
+#[tokio::test]
+async fn a_saudi_tenant_cannot_issue_a_dollar_tax_invoice() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let invoice = |currency: &str, key: &str| {
+        Request::post("/v1/sales/invoices")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", idem(key))
+            .body(Body::from(
+                serde_json::json!({
+                    "customer": { "name": "Rawabi" },
+                    "issued_on": "2026-03-01T00:00:00Z",
+                    "currency": currency,
+                    "lines": [{ "description": "Work", "net": 10_000, "vat": "standard" }]
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let (status, body, _) = fixture.send(invoice("USD", "INV-USD")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "sales.document_currency");
+    assert_eq!(body["args"]["expected"]["value"], "SAR");
+    assert_eq!(body["args"]["found"]["value"], "USD");
+
+    let (status, body, _) = fixture.send(invoice("SAR", "INV-SAR")).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    fixture.cleanup().await;
+}
+
 /// An unbalanced entry is a 400 that says by how much — in the caller's
 /// language.
 #[tokio::test]
