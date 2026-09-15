@@ -479,7 +479,7 @@ pub async fn close_year_in(
     caught_up(&mut *conn).await?;
 
     let accounts = ClosingAccounts::resolve(&mut *conn).await?;
-    let lines = crate::profit_and_loss(&mut *conn, from, until, None).await?;
+    let lines = crate::profit_and_loss(&mut *conn, from, until, None, None).await?;
     let mut by_currency: BTreeMap<CurrencyCode, Vec<crate::Line>> = BTreeMap::new();
     for line in lines {
         if line.balance.minor() == 0 {

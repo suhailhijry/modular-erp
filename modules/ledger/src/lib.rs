@@ -20,13 +20,14 @@
 //! Drafts, and posting rules driven by configuration. Each is real, and each
 //! needs someone to want it before its shape is decided. The fiscal calendar
 //! and the statements read by it are [`fiscal`], [`profit_and_loss`],
-//! [`balance_sheet`] and [`journal`]; a
-//! formal period close, FX and cost centers were wanted on 2026-09-14 and are
-//! being built in that order.
+//! [`balance_sheet`] and [`journal`]; the period close is [`period`]; the
+//! dimension a profit and loss is cut by is [`CostCenter`]. FX was wanted on
+//! 2026-09-14 and deferred on 2026-09-15 to the business.
 
 mod account;
 mod charts;
 mod commands;
+mod cost_center;
 mod entry;
 pub mod fiscal;
 pub mod http;
@@ -39,19 +40,22 @@ mod vat;
 pub use account::{Account, AccountEvent, AccountKind};
 pub use charts::{CHARTS, Chart, Installed, TemplateAccount, chart};
 pub use commands::{
-    LedgerError, accepts_postings, close_account, install_chart, install_chart_in, open_account,
-    open_account_in, post_entry, post_entry_in, posted_lines, posting_currency, preview_chart,
-    rename_account, reverse_entry, reverse_in,
+    LedgerError, accepts_postings, close_account, close_cost_center, install_chart,
+    install_chart_in, open_account, open_account_in, open_cost_center, post_entry, post_entry_in,
+    posted_lines, posting_currency, preview_chart, rename_account, rename_cost_center,
+    reverse_entry, reverse_in,
 };
+pub use cost_center::{CostCenter, CostCenterEvent};
 pub use entry::{JournalEntry, JournalEntryEvent};
 pub use fiscal::{CalendarError, FiscalCalendar, FiscalCalendars, NotAPattern, Pattern, Period};
 pub use lines::{BalancedLines, Line, Unbalanced};
 pub use period::{BookedYear, Books, CloseError, ClosingAccounts};
 pub use projections::{
-    AccountBalance, Accounts, BranchBalance, JournalEntryView, JournalFilter, JournalLine, Ledger,
-    Postings, SheetParts, StatementLine, TradingResult, TrialBalance, account_balances,
-    balance_sheet, balances_at, branch_balances, imbalances, journal, journal_entry,
-    profit_and_loss, projections, trial_balance,
+    AccountBalance, Accounts, BranchBalance, CostCenterLine, CostCenterRow, CostCenters,
+    JournalEntryView, JournalFilter, JournalLine, Ledger, Postings, SheetParts, StatementLine,
+    TradingResult, TrialBalance, account_balances, balance_sheet, balances_at, branch_balances,
+    cost_centers, imbalances, journal, journal_entry, profit_and_loss,
+    profit_and_loss_by_cost_center, projections, trial_balance,
 };
 pub use vat::{Rates, VatCategory};
 
@@ -136,6 +140,7 @@ pub fn upcasters() -> &'static erp_eventlog::Upcasters {
         AccountEvent::NAMES
             .iter()
             .chain(JournalEntryEvent::NAMES.iter())
+            .chain(CostCenterEvent::NAMES.iter())
             .fold(erp_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
             })

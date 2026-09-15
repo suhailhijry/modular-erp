@@ -30,7 +30,8 @@ than a check on the posting rules.
 | [`projections.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/ledger/src/projections.rs) | `Ledger` group, `Accounts`, `Postings`, `trial_balance` |
 | [`charts.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/ledger/src/charts.rs) | Ready-made charts of accounts |
 | [`vat.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/ledger/src/vat.rs) | `VatCategory` and `Rates` |
-| [`period.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/ledger/src/period.rs) | `Books`, closing the books |
+| [`period.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/ledger/src/period.rs) | `Books`, closing periods and booking years |
+| [`cost_center.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/ledger/src/cost_center.rs) | `CostCenter`, `CostCenterEvent` |
 | [`http.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/ledger/src/http.rs) | The routes |
 | [`schema/install.sql`](https://github.com/suhailhijry/modular-erp/blob/main/modules/ledger/schema/install.sql) | `proj_ledger` |
 
@@ -41,10 +42,12 @@ pub struct Line {
     pub account: AggregateId,
     pub amount: Money,          // positive debits, negative credits
     pub memo: Option<String>,
+    pub cost_center: Option<AggregateId>,   // absent: the entry's branch
 }
 impl Line {
     pub const fn new(account: AggregateId, amount: Money) -> Self;
     pub fn with_memo(self, memo: impl Into<String>) -> Self;
+    pub fn with_cost_center(self, cost_center: Option<AggregateId>) -> Self;
     pub const fn is_debit(&self) -> bool;
 }
 ```
@@ -454,6 +457,10 @@ with `POST …/close` and `…/reopen`, and `GET`/`PUT /v1/ledger/closing-accoun
 | `GET` | `/v1/ledger/years/{year}` | Read |
 | `POST` | `/v1/ledger/years/{year}/close`, `…/reopen` | ManageAccounts |
 | `GET` `PUT` | `/v1/ledger/closing-accounts` | Read / ManageAccounts |
+| `GET` `POST` | `/v1/ledger/cost-centers` | Read / ManageAccounts |
+| `PUT` | `/v1/ledger/cost-centers/{id}` | ManageAccounts |
+| `POST` | `/v1/ledger/cost-centers/{id}/close` | ManageAccounts |
+| `GET` | `/v1/ledger/statements/profit-and-loss/by-cost-center` | Read |
 | `GET` `PUT` | `/v1/ledger/vat-rates` | Read / ManageAccounts |
 
 ### VAT rates carry more than a rate
@@ -560,10 +567,52 @@ The journal lists entries newest first, paged on `(occurred_on, entry_id)` so a
 page is stable under new postings, filterable by range, by an account the entry
 touches, and by branch.
 
+## Cost centers
+
+```rust
+pub enum CostCenterEvent { Opened { name: String }, Renamed { name: String }, Closed }
+pub struct CostCenter { pub exists: bool, pub name: String, pub closed: bool }
+impl CostCenter { pub const fn accepts_lines(&self) -> bool; }
+
+pub async fn open_cost_center(db, id, name, metadata) -> Outcome<CostCenterEvent>;
+pub async fn rename_cost_center(db, id, name, metadata) -> Outcome<CostCenterEvent>;
+pub async fn close_cost_center(db, id, metadata) -> Outcome<CostCenterEvent>;
+
+pub async fn cost_centers(conn) -> Result<Vec<CostCenterRow>, _>;
+pub async fn profit_and_loss_by_cost_center(conn, from, until, branch)
+    -> Result<Vec<CostCenterLine>, _>;
+```
+
+**The dimension a profit and loss is cut by** (decided 2026-09-15). A
+department, a project, a shop — carried **per line**, so one entry can charge
+two departments, and optional: a line that names none takes its entry's
+branch when it is projected, and one with neither is unassigned. That default
+is decided in the projection rather than written into the event, so an entry
+posted before cost centers existed lands in its branch on the next rebuild.
+
+**Every open branch is a cost center without being opened.** The two share an
+id namespace: a line naming an id the ledger does not know is checked against
+the branches log the way a posting's branch is, and opening a cost center
+under an open branch's id is refused as a duplicate. Only the ones opened as
+such are listed; a report that wants a branch's *name* reads the branches
+group beside this one (L3).
+
+A closed cost center keeps its history and refuses new lines
+(`ledger.cost_center_closed`); an unknown one refuses the line
+(`ledger.no_such_cost_center`). A reversal charges the same department back.
+Manual journal entries and purchase bill lines carry one per line; invoices,
+till sales, payroll and prepaid get the branch default. `?cost_center=` on the
+profit and loss and the journal sits beside `?branch=` — confinement is
+unchanged and separate, a confined member's reads stay pinned to
+`posting.branch`, so the filter only ever slices their branch — and the
+`by-cost-center` cut gives one profit and loss per cost center, unassigned
+last. The balance sheet has no such cut: a cost center's books do not balance
+on their own.
+
 ## What is deliberately absent
 
 Drafts, and posting rules driven by configuration. Each is real, and each needs
-somebody to want it before its shape is decided. Fiscal periods and the close
-were wanted on 2026-09-14 and are built; cost centers are next. FX was wanted
+somebody to want it before its shape is decided. Fiscal periods, the close and
+cost centers were wanted on 2026-09-14 and are built. FX was wanted
 and then deferred on 2026-09-15 — per-currency books, the exchange itself left
 to the business — until a tenant asks for the gain or loss on it.

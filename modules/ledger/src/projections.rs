@@ -6,6 +6,7 @@ use erp_types::{CurrencyCode, Cursor, Money, Page, Timestamp};
 use sqlx::PgConnection;
 
 use crate::account::{AccountEvent, AccountKind};
+use crate::cost_center::CostCenterEvent;
 use crate::entry::JournalEntryEvent;
 
 /// Accounts and postings, in one group.
@@ -19,8 +20,9 @@ pub struct Ledger;
 impl ProjectionGroup for Ledger {
     const NAME: &'static str = "ledger";
     const SCHEMA: &'static str = "proj_ledger";
-    /// 2: a posting says whether it is a year's closing entry (§85).
-    const VERSION: i16 = 2;
+    /// 2: a posting says whether it is a year's closing entry (§85). 3: a
+    /// posting carries its cost center, and cost centers have a table (§87).
+    const VERSION: i16 = 3;
 }
 
 fn decode<E: serde::de::DeserializeOwned>(
@@ -135,8 +137,8 @@ impl Projection for Postings {
             sqlx::query(
                 "INSERT INTO posting
                      (id, entry_id, line_index, account, amount, currency,
-                      memo, branch, occurred_on, recorded_at, closing)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                      memo, branch, occurred_on, recorded_at, closing, cost_center)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             )
             // Derived from the position, so a rebuild produces the same key.
             // `Uuid::new_v4()` here would make every replayed row differ.
@@ -155,8 +157,70 @@ impl Projection for Postings {
             .bind(occurred_on)
             .bind(ctx.event_time())
             .bind(closing)
+            // **The line's cost center, or the entry's branch.** Decided here
+            // rather than written into the event, so an entry posted before
+            // cost centers existed lands in its branch on the next rebuild.
+            .bind(
+                line.cost_center
+                    .as_ref()
+                    .map(erp_types::AggregateId::as_str)
+                    .or(envelope.metadata.branch()),
+            )
             .execute(&mut *conn)
             .await?;
+        }
+        Ok(())
+    }
+}
+
+/// The cost centers opened as such. An open branch is one too, and is not
+/// here — see `cost_center.rs`.
+#[derive(Debug)]
+pub struct CostCenters;
+
+#[async_trait::async_trait]
+impl Projection for CostCenters {
+    type Group = Ledger;
+
+    fn name(&self) -> &'static str {
+        "cost_centers"
+    }
+
+    async fn apply(
+        &self,
+        ctx: &ProjectionCtx<'_>,
+        envelope: &Envelope,
+        conn: &mut PgConnection,
+    ) -> Result<(), ProjectionError> {
+        if !CostCenterEvent::NAMES.contains(&envelope.event_name.as_str()) {
+            return Ok(());
+        }
+        let id = envelope.stream.id.as_str();
+        match decode::<CostCenterEvent>(ctx, envelope)? {
+            CostCenterEvent::Opened { name } => {
+                sqlx::query(
+                    "INSERT INTO cost_center (id, name, closed, opened_at)
+                     VALUES ($1, $2, false, $3)",
+                )
+                .bind(id)
+                .bind(&name)
+                .bind(ctx.event_time())
+                .execute(&mut *conn)
+                .await?;
+            }
+            CostCenterEvent::Renamed { name } => {
+                sqlx::query("UPDATE cost_center SET name = $2 WHERE id = $1")
+                    .bind(id)
+                    .bind(&name)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            CostCenterEvent::Closed => {
+                sqlx::query("UPDATE cost_center SET closed = true WHERE id = $1")
+                    .bind(id)
+                    .execute(&mut *conn)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -165,7 +229,47 @@ impl Projection for Postings {
 /// Every projection this module contributes.
 #[must_use]
 pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = Ledger>>> {
-    vec![std::sync::Arc::new(Accounts), std::sync::Arc::new(Postings)]
+    vec![
+        std::sync::Arc::new(Accounts),
+        std::sync::Arc::new(Postings),
+        std::sync::Arc::new(CostCenters),
+    ]
+}
+
+/// One cost center as the list shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CostCenterRow {
+    pub id: String,
+    pub name: String,
+    pub closed: bool,
+    /// Lines that named it, or fell to it as their entry's branch.
+    pub postings: i64,
+}
+
+/// The cost centers opened as such, with how much has landed in each.
+///
+/// # Errors
+/// If the database does.
+pub async fn cost_centers(conn: &mut PgConnection) -> Result<Vec<CostCenterRow>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT c.id as "id!", c.name as "name!", c.closed as "closed!",
+                  count(p.id) as "postings!"
+             FROM proj_ledger.cost_center c
+             LEFT JOIN proj_ledger.posting p ON p.cost_center = c.id
+            GROUP BY c.id, c.name, c.closed
+            ORDER BY c.id"#
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| CostCenterRow {
+            id: r.id,
+            name: r.name,
+            closed: r.closed,
+            postings: r.postings,
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +522,7 @@ pub async fn profit_and_loss(
     from: Timestamp,
     until: Timestamp,
     branch: Option<&str>,
+    cost_center: Option<&str>,
 ) -> Result<Vec<StatementLine>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"SELECT a.code as "code!", a.name as "name!", a.kind as "kind!",
@@ -429,10 +534,57 @@ pub async fn profit_and_loss(
                ON p.account = a.code
               AND p.occurred_on >= $1 AND p.occurred_on < $2
               AND ($3::text IS NULL OR p.branch = $3)
+              AND ($4::text IS NULL OR p.cost_center = $4)
               AND NOT p.closing
             WHERE a.kind IN ('revenue', 'expense')
             GROUP BY a.code, a.name, a.kind, a.currency
             ORDER BY a.kind DESC, a.code"#,
+        from,
+        until,
+        branch,
+        cost_center,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    rows.into_iter()
+        .map(|r| statement_line(r.code, r.name, &r.kind, &r.currency, r.balance, r.postings))
+        .collect()
+}
+
+/// One trading account's result in one cost center.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CostCenterLine {
+    /// `None` for lines that named none and had no branch to fall to.
+    pub cost_center: Option<String>,
+    pub line: StatementLine,
+}
+
+/// **The profit and loss cut by cost center**: every trading account with a
+/// posting in `[from, until)`, per cost center, closing entries left out as
+/// [`profit_and_loss`] leaves them. Ordered by cost center, unassigned last.
+///
+/// # Errors
+/// If the database does.
+pub async fn profit_and_loss_by_cost_center(
+    conn: &mut PgConnection,
+    from: Timestamp,
+    until: Timestamp,
+    branch: Option<&str>,
+) -> Result<Vec<CostCenterLine>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT p.cost_center, a.code as "code!", a.name as "name!", a.kind as "kind!",
+                  a.currency as "currency!",
+                  sum(p.amount)::BIGINT as "balance!",
+                  count(p.id) as "postings!"
+             FROM proj_ledger.posting p
+             JOIN proj_ledger.account a ON a.code = p.account
+            WHERE a.kind IN ('revenue', 'expense')
+              AND p.occurred_on >= $1 AND p.occurred_on < $2
+              AND ($3::text IS NULL OR p.branch = $3)
+              AND NOT p.closing
+            GROUP BY p.cost_center, a.code, a.name, a.kind, a.currency
+            ORDER BY p.cost_center NULLS LAST, a.kind DESC, a.code"#,
         from,
         until,
         branch,
@@ -441,7 +593,12 @@ pub async fn profit_and_loss(
     .await?;
 
     rows.into_iter()
-        .map(|r| statement_line(r.code, r.name, &r.kind, &r.currency, r.balance, r.postings))
+        .map(|r| {
+            Ok(CostCenterLine {
+                cost_center: r.cost_center,
+                line: statement_line(r.code, r.name, &r.kind, &r.currency, r.balance, r.postings)?,
+            })
+        })
         .collect()
 }
 
@@ -572,6 +729,8 @@ pub struct JournalLine {
     /// Signed as posted: positive debit, negative credit.
     pub amount: Money,
     pub memo: Option<String>,
+    /// What it named, or the entry's branch.
+    pub cost_center: Option<String>,
 }
 
 /// One entry with its lines — what the journal lists.
@@ -595,6 +754,8 @@ pub struct JournalFilter<'a> {
     /// Entries with a line on this account.
     pub account: Option<&'a str>,
     pub branch: Option<&'a str>,
+    /// Entries with a line in this cost center.
+    pub cost_center: Option<&'a str>,
 }
 
 /// **The journal, newest first**, one page at a time.
@@ -627,6 +788,8 @@ pub async fn journal(
               AND ($3::text IS NULL OR p.branch = $3)
               AND ($4::text IS NULL OR p.entry_id IN (
                       SELECT entry_id FROM proj_ledger.posting WHERE account = $4))
+              AND ($8::text IS NULL OR p.entry_id IN (
+                      SELECT entry_id FROM proj_ledger.posting WHERE cost_center = $8))
               AND ($5::timestamptz IS NULL OR (p.occurred_on, p.entry_id) < ($5, $6))
             GROUP BY p.entry_id
             ORDER BY min(p.occurred_on) DESC, p.entry_id DESC
@@ -638,6 +801,7 @@ pub async fn journal(
         before_on,
         before_id,
         limit,
+        filter.cost_center,
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -700,7 +864,7 @@ async fn lines_of(
 ) -> Result<std::collections::HashMap<String, Vec<JournalLine>>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"SELECT p.entry_id as "entry_id!", p.account as "account!", a.name as "name?",
-                  p.amount as "amount!", p.currency as "currency!", p.memo
+                  p.amount as "amount!", p.currency as "currency!", p.memo, p.cost_center
              FROM proj_ledger.posting p
              LEFT JOIN proj_ledger.account a ON a.code = p.account
             WHERE p.entry_id = ANY($1)
@@ -720,6 +884,7 @@ async fn lines_of(
             name: row.name.unwrap_or_default(),
             amount: Money::from_minor(row.amount, currency),
             memo: row.memo,
+            cost_center: row.cost_center,
         });
     }
     Ok(by_entry)

@@ -1,0 +1,57 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.id as \"id!\", c.name as \"name!\", c.closed as \"closed!\",\n                  count(p.id) as \"postings!\"\n             FROM proj_ledger.cost_center c\n             LEFT JOIN proj_ledger.posting p ON p.cost_center = c.id\n            GROUP BY c.id, c.name, c.closed\n            ORDER BY c.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.cost_center",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.cost_center",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "closed!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.cost_center",
+            "name": "closed"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "postings!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "be3553fc7e928458069539239e75f76c9e716c5f751ed2649ba18d1a7c982ae2"
+}

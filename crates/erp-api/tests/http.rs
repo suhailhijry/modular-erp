@@ -1757,6 +1757,167 @@ async fn a_saudi_tenant_cannot_issue_a_dollar_tax_invoice() {
     fixture.cleanup().await;
 }
 
+/// **Cost centers cut the profit and loss, over HTTP.** Opened, renamed,
+/// named on a line, refused when unknown or closed, and read back three ways:
+/// the list, the filtered P&L and the by-cost-center cut, and the journal.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one dimension, every route it has")]
+async fn cost_centers_cut_the_profit_and_loss() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let post = |path: &str, key: &str, body: serde_json::Value| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", idem(key))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let put = |path: &str, body: serde_json::Value| {
+        Request::put(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let read = |path: &str| {
+        Request::get(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (status, body, _) = fixture
+        .send(post(
+            "/v1/ledger/cost-centers",
+            "cc-marketing",
+            serde_json::json!({ "id": "marketing", "name": "Marketing" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body, _) = fixture
+        .send(post(
+            "/v1/ledger/cost-centers",
+            "cc-marketing-again",
+            serde_json::json!({ "id": "marketing", "name": "Again" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "ledger.cost_center_exists");
+    let (status, body, _) = fixture
+        .send(put(
+            "/v1/ledger/cost-centers/marketing",
+            serde_json::json!({ "name": "Marketing & PR" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    for (code, kind) in [("1000", "asset"), ("4000", "revenue"), ("5000", "expense")] {
+        let (status, body, _) = fixture
+            .send(post(
+                "/v1/ledger/accounts",
+                code,
+                serde_json::json!({ "code": code, "name": code, "kind": kind, "currency": "SAR" }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let entry = |key: &str, cost_center: &str| {
+        post(
+            "/v1/ledger/entries",
+            key,
+            serde_json::json!({
+                "occurred_on": "2026-03-10T00:00:00Z",
+                "memo": key,
+                "lines": [
+                    { "account": "5000", "amount": { "minor": 10_000, "currency": "SAR" },
+                      "cost_center": cost_center },
+                    { "account": "1000", "amount": { "minor": -10_000, "currency": "SAR" } }
+                ]
+            }),
+        )
+    };
+    let (status, body, _) = fixture.send(entry("nowhere", "nowhere")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "ledger.no_such_cost_center");
+    let (status, body, _) = fixture.send(entry("rent", "marketing")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = fixture
+        .send(post(
+            "/v1/ledger/entries",
+            "sale",
+            serde_json::json!({
+                "occurred_on": "2026-03-12T00:00:00Z",
+                "lines": [
+                    { "account": "1000", "amount": { "minor": 30_000, "currency": "SAR" } },
+                    { "account": "4000", "amount": { "minor": -30_000, "currency": "SAR" } }
+                ]
+            }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    fixture.project_ledger(tenant).await;
+
+    let (status, centers, _) = fixture.send(read("/v1/ledger/cost-centers")).await;
+    assert_eq!(status, StatusCode::OK, "{centers}");
+    assert_eq!(centers[0]["id"], "marketing");
+    assert_eq!(centers[0]["name"], "Marketing & PR");
+    assert_eq!(centers[0]["postings"], 1);
+    assert_eq!(centers[0]["closed"], false);
+
+    let range = "from=2026-01-01T00:00:00Z&until=2027-01-01T00:00:00Z";
+    let (status, pnl, _) = fixture
+        .send(read(&format!(
+            "/v1/ledger/statements/profit-and-loss?{range}&cost_center=marketing"
+        )))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pnl}");
+    assert_eq!(pnl["cost_center"], "marketing");
+    assert_eq!(pnl["currencies"][0]["expenses"][0]["amount"], 10_000);
+    assert_eq!(pnl["currencies"][0]["total_revenue"], 0);
+    let (status, cut, _) = fixture
+        .send(read(&format!(
+            "/v1/ledger/statements/profit-and-loss/by-cost-center?{range}"
+        )))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{cut}");
+    assert_eq!(cut["cost_centers"][0]["cost_center"], "marketing");
+    assert_eq!(cut["cost_centers"][0]["currencies"][0]["result"], -10_000);
+    assert!(
+        cut["cost_centers"][1]["cost_center"].is_null(),
+        "unassigned last: {cut}"
+    );
+    assert_eq!(cut["cost_centers"][1]["currencies"][0]["result"], 30_000);
+
+    let (status, page, _) = fixture
+        .send(read("/v1/ledger/entries?cost_center=marketing"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["lines"][0]["cost_center"], "marketing");
+    assert!(page["items"][0]["lines"][1]["cost_center"].is_null());
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/ledger/cost-centers/marketing/close")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = fixture.send(entry("late", "marketing")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "ledger.cost_center_closed");
+
+    fixture.cleanup().await;
+}
+
 /// An unbalanced entry is a 400 that says by how much — in the caller's
 /// language.
 #[tokio::test]
@@ -3151,6 +3312,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("periods", ALL_ROLES),
     ("year", ALL_ROLES),
     ("closing_accounts", ALL_ROLES),
+    ("list_cost_centers", ALL_ROLES),
+    ("profit_and_loss_by_cost_center", ALL_ROLES),
     ("balances", ALL_ROLES),
     ("profit_and_loss", ALL_ROLES),
     ("balance_sheet", ALL_ROLES),
@@ -3478,6 +3641,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("close_year", &["owner", "accountant"]),
     ("reopen_year", &["owner", "accountant"]),
     ("set_closing_accounts", &["owner", "accountant"]),
+    ("open_cost_center", &["owner", "accountant"]),
+    ("rename_cost_center", &["owner", "accountant"]),
+    ("close_cost_center", &["owner", "accountant"]),
     // The calendar is the accountant's call, like closing the books.
     ("set_fiscal_calendar", &["owner", "accountant"]),
     ("set_vat_rates", &["owner", "accountant"]),
@@ -3644,7 +3810,7 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        275,
+        280,
         "expected two hundred and sixty-nine role-scoped operations"
     );
 

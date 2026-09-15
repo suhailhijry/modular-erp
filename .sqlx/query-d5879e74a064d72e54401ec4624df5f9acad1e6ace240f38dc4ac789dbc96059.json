@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT p.entry_id as \"entry_id!\", p.account as \"account!\", a.name as \"name?\",\n                  p.amount as \"amount!\", p.currency as \"currency!\", p.memo\n             FROM proj_ledger.posting p\n             LEFT JOIN proj_ledger.account a ON a.code = p.account\n            WHERE p.entry_id = ANY($1)\n            ORDER BY p.entry_id, p.line_index",
+  "query": "SELECT p.entry_id as \"entry_id!\", p.account as \"account!\", a.name as \"name?\",\n                  p.amount as \"amount!\", p.currency as \"currency!\", p.memo, p.cost_center\n             FROM proj_ledger.posting p\n             LEFT JOIN proj_ledger.account a ON a.code = p.account\n            WHERE p.entry_id = ANY($1)\n            ORDER BY p.entry_id, p.line_index",
   "describe": {
     "columns": [
       {
@@ -68,6 +68,17 @@
             "name": "memo"
           }
         }
+      },
+      {
+        "ordinal": 6,
+        "name": "cost_center",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.posting",
+            "name": "cost_center"
+          }
+        }
       }
     ],
     "parameters": {
@@ -81,8 +92,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "d42e23c63364cc61f51680e200f20ca5917b52fe7002b56428302acce20693b2"
+  "hash": "d5879e74a064d72e54401ec4624df5f9acad1e6ace240f38dc4ac789dbc96059"
 }

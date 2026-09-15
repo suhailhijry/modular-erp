@@ -384,6 +384,7 @@ async fn statements_are_sums_over_the_postings_at_the_instants_asked() {
         at("2026-01-01T00:00:00Z"),
         at("2027-01-01T00:00:00Z"),
         None,
+        None,
     )
     .await
     .expect("reads");
@@ -411,6 +412,7 @@ async fn statements_are_sums_over_the_postings_at_the_instants_asked() {
         at("2026-01-01T00:00:00Z"),
         at("2027-01-01T00:00:00Z"),
         Some("olaya"),
+        None,
     )
     .await
     .expect("reads");
@@ -1834,7 +1836,7 @@ async fn a_year_books_into_retained_earnings_and_reopens_in_reverse() {
     );
     assert_eq!(fixture.balance("1000").await, riyals(1_450));
     let mut conn = fixture.db.acquire().await.expect("connection");
-    let pnl = profit_and_loss(&mut conn, on("2025-01-01"), on("2026-01-01"), None)
+    let pnl = profit_and_loss(&mut conn, on("2025-01-01"), on("2026-01-01"), None, None)
         .await
         .expect("reads");
     let line = |code: &str| pnl.iter().find(|l| l.code == code).expect("shown").balance;
@@ -1981,4 +1983,251 @@ async fn a_year_books_into_retained_earnings_and_reopens_in_reverse() {
 
 fn day(text: &str) -> chrono::NaiveDate {
     text.parse().expect("a date")
+}
+
+// ---------------------------------------------------------------------------
+// Cost centers
+// ---------------------------------------------------------------------------
+
+/// **A cost center is a dimension a line carries, and a branch is one
+/// already.** A line names one, or falls to its entry's branch, or is
+/// unassigned; the profit and loss cuts by it and the journal filters on it;
+/// an unknown or closed one refuses the line; a reversal charges the same
+/// department back.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one dimension, every rule it has")]
+async fn a_cost_center_is_a_dimension_a_line_carries_and_a_branch_is_one_already() {
+    use ledger::{close_cost_center, open_cost_center, rename_cost_center};
+
+    let fixture = Fixture::new().await;
+    for (account, kind) in [
+        ("1000", AccountKind::Asset),
+        ("4000", AccountKind::Revenue),
+        ("5000", AccountKind::Expense),
+    ] {
+        fixture.account(account, kind, sar()).await;
+    }
+    fixture.branches(&["olaya"]).await;
+    open_cost_center(
+        &fixture.db,
+        &code("marketing"),
+        "Marketing",
+        &Metadata::default(),
+    )
+    .await
+    .expect("opens");
+    rename_cost_center(
+        &fixture.db,
+        &code("marketing"),
+        "Marketing & PR",
+        &Metadata::default(),
+    )
+    .await
+    .expect("renames");
+    let again = open_cost_center(
+        &fixture.db,
+        &code("marketing"),
+        "Again",
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("refused");
+    assert!(matches!(
+        rejection(&again),
+        Some(LedgerError::CostCenterExists(_))
+    ));
+    let shadow = open_cost_center(&fixture.db, &code("olaya"), "Olaya", &Metadata::default())
+        .await
+        .expect_err("a branch is a cost center already");
+    assert!(matches!(
+        rejection(&shadow),
+        Some(LedgerError::CostCenterExists(_))
+    ));
+
+    let post = |id: &str, lines: Vec<Line>, branch: Option<&str>| {
+        let lines = BalancedLines::new(lines).expect("balances");
+        let metadata = branch.map_or_else(Metadata::default, |b| Metadata::default().at_branch(b));
+        let id = code(id);
+        let db = &fixture.db;
+        async move { post_entry(db, &id, on("2026-03-10"), "cut", lines, &metadata).await }
+    };
+    // Rent at Olaya: the expense named marketing, the cash fell to the branch.
+    post(
+        "rent",
+        vec![
+            Line::new(code("5000"), riyals(100)).with_cost_center(Some(code("marketing"))),
+            Line::new(code("1000"), riyals(-100)),
+        ],
+        Some("olaya"),
+    )
+    .await
+    .expect("posts");
+    // A sale with no branch, its revenue charged to Olaya — a branch as a cost
+    // center, without being opened as one.
+    post(
+        "sale",
+        vec![
+            Line::new(code("1000"), riyals(300)),
+            Line::new(code("4000"), riyals(-300)).with_cost_center(Some(code("olaya"))),
+        ],
+        None,
+    )
+    .await
+    .expect("posts");
+    // Neither named nor at a branch: unassigned.
+    post(
+        "misc",
+        vec![
+            Line::new(code("5000"), riyals(40)),
+            Line::new(code("1000"), riyals(-40)),
+        ],
+        None,
+    )
+    .await
+    .expect("posts");
+    let nowhere = post(
+        "nowhere",
+        vec![
+            Line::new(code("5000"), riyals(1)).with_cost_center(Some(code("nowhere"))),
+            Line::new(code("1000"), riyals(-1)),
+        ],
+        None,
+    )
+    .await
+    .expect_err("neither a cost center nor a branch");
+    assert!(
+        matches!(rejection(&nowhere), Some(LedgerError::NoSuchCostCenter(id)) if id == "nowhere"),
+        "{nowhere:?}"
+    );
+    ledger::reverse_entry(
+        &fixture.db,
+        &code("sale"),
+        &code("sale-reversal"),
+        on("2026-03-11"),
+        "undo",
+        &Metadata::default(),
+    )
+    .await
+    .expect("reverses");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let pnl = |cost_center: Option<&str>| {
+        let cc = cost_center.map(str::to_owned);
+        let db = &fixture.db;
+        async move {
+            let mut conn = db.acquire().await.expect("connection");
+            profit_and_loss(
+                &mut conn,
+                on("2026-01-01"),
+                on("2027-01-01"),
+                None,
+                cc.as_deref(),
+            )
+            .await
+            .expect("reads")
+        }
+    };
+    let line = |lines: &[ledger::StatementLine], code: &str| {
+        lines
+            .iter()
+            .find(|l| l.code == code)
+            .expect("shown")
+            .balance
+    };
+    let marketing = pnl(Some("marketing")).await;
+    assert_eq!(line(&marketing, "5000"), riyals(100));
+    assert_eq!(line(&marketing, "4000"), riyals(0));
+    let olaya = pnl(Some("olaya")).await;
+    assert_eq!(
+        line(&olaya, "4000"),
+        riyals(0),
+        "the sale and its reversal both charged Olaya"
+    );
+    assert_eq!(line(&olaya, "5000"), riyals(0), "the rent named marketing");
+    let whole = pnl(None).await;
+    assert_eq!(line(&whole, "5000"), riyals(140));
+
+    let columns =
+        ledger::profit_and_loss_by_cost_center(&mut conn, on("2026-01-01"), on("2027-01-01"), None)
+            .await
+            .expect("reads");
+    let cut: Vec<(Option<String>, String, Money)> = columns
+        .iter()
+        .map(|c| (c.cost_center.clone(), c.line.code.clone(), c.line.balance))
+        .collect();
+    assert_eq!(
+        cut,
+        [
+            (Some("marketing".to_owned()), "5000".to_owned(), riyals(100)),
+            (Some("olaya".to_owned()), "4000".to_owned(), riyals(0)),
+            (None, "5000".to_owned(), riyals(40)),
+        ]
+    );
+
+    let page = journal(
+        &mut conn,
+        &JournalFilter {
+            cost_center: Some("marketing"),
+            ..JournalFilter::default()
+        },
+        10,
+        None,
+    )
+    .await
+    .expect("reads");
+    let ids: Vec<&str> = page.items.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, ["rent"]);
+    let rent = journal_entry(&mut conn, "rent")
+        .await
+        .expect("reads")
+        .expect("posted");
+    assert_eq!(rent.lines[0].cost_center.as_deref(), Some("marketing"));
+    assert_eq!(
+        rent.lines[1].cost_center.as_deref(),
+        Some("olaya"),
+        "a line naming none falls to the entry's branch"
+    );
+    let reversal = journal_entry(&mut conn, "sale-reversal")
+        .await
+        .expect("reads")
+        .expect("posted");
+    assert_eq!(
+        reversal.lines[1].cost_center.as_deref(),
+        Some("olaya"),
+        "charged back where it was charged"
+    );
+    let centers = ledger::cost_centers(&mut conn).await.expect("reads");
+    assert_eq!(centers.len(), 1, "a branch is not listed as a cost center");
+    assert_eq!(centers[0].id, "marketing");
+    assert_eq!(centers[0].name, "Marketing & PR");
+    assert_eq!(centers[0].postings, 1);
+    assert!(!centers[0].closed);
+    drop(conn);
+
+    // Closed: history stays, new lines are refused.
+    close_cost_center(&fixture.db, &code("marketing"), &Metadata::default())
+        .await
+        .expect("closes");
+    let closed = post(
+        "late",
+        vec![
+            Line::new(code("5000"), riyals(1)).with_cost_center(Some(code("marketing"))),
+            Line::new(code("1000"), riyals(-1)),
+        ],
+        None,
+    )
+    .await
+    .expect_err("closed");
+    assert!(
+        matches!(rejection(&closed), Some(LedgerError::CostCenterClosed(_))),
+        "{closed:?}"
+    );
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let centers = ledger::cost_centers(&mut conn).await.expect("reads");
+    assert!(centers[0].closed);
+    drop(conn);
+
+    fixture.cleanup().await;
 }

@@ -26,12 +26,10 @@ on good grounds — the WPS file below being the sharpest case, where guessing a
 an unverifiable specification is the *worst* available option and two other
 documents said so while this one did not.
 
-**Where this stands:** 1,783 tests as of 2026-09-15 — 1,782 green, clippy, fmt and `cargo deny`
-clean; the one red is the `/v1` compatibility guard on the decided removal of
-`PUT /v1/ledger/books`, waiting on `just baseline`. **Priority 1 of
-[Road to selling](#road-to-selling) is complete** (§79–§83), and Priority 2 has begun with the
-statements on the fiscal calendar, the period close, and FX deferred behind a
-riyals-only rule for tax documents (§84–§86). The per-phase test
+**Where this stands:** 1,786 tests green as of 2026-09-15, clippy, fmt and `cargo deny` clean.
+**Priority 1 of [Road to selling](#road-to-selling) is complete** (§79–§83), and Priority 2's
+statements item is done: the fiscal calendar, the period close, FX deferred behind a
+riyals-only rule for tax documents, and cost centers (§84–§87). The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end, and what blocks selling
@@ -158,6 +156,19 @@ drift with every change.
   riyals, because ZATCA states the tax in riyals and this build cannot state a
   riyal tax amount for a dollar invoice — `tax_sa` seeds the rule, `sales`
   refuses (§86).
+- **Cost centers are a per-line dimension** (decided 2026-09-15, all as
+  recommended). A ledger aggregate like an account — open, rename, close; a
+  closed one refuses lines — sharing the id namespace with branches, so an open
+  branch is a cost center without being opened. `Line.cost_center` is optional,
+  never mandatory, and a line without one takes the entry's branch; a P&L by
+  cost center shows the rest as unassigned. Manual journal entries and purchase
+  bill lines carry one per line; invoices, till sales, payroll and prepaid get
+  the branch default. `?cost_center=` on the P&L and the journal beside
+  `?branch=`, and a `by-cost-center` P&L with one column per center; the
+  balance sheet stays company-wide. Confinement is unchanged and separate:
+  a confined member's reads stay pinned to `posting.branch`. Reassigning a
+  posted line is a reversal and a repost; `reports` does not get the dimension
+  yet.
 
 ### Waiting on the product owner
 
@@ -256,8 +267,9 @@ drift with every change.
       **Order:** statements on the calendar (~2 weeks) → formal closure (~1) →
       FX levels i and ii (~2–3) → cost centers (~1–2) → revaluation (~1).
       **Statements on the calendar built 2026-09-14 (§84), the formal closure
-      the same night (§85); FX deferred 2026-09-15 (Decided above, §86)**;
-      cost centers are next, revaluation goes with FX
+      the same night (§85); FX deferred 2026-09-15 (Decided above, §86); cost
+      centers built the same day (§87)**. Done but for revaluation, which goes
+      with FX
 - [ ] **Receipts and invoices a customer can hold.** A till sale's response carries
       no QR, and the full nine-field QR exists only after the worker signs; a B2B
       invoice is not held back until ZATCA clears it, and handing one over uncleared
@@ -1301,6 +1313,44 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       `sales/commands.rs:46` (from both credit paths, as they stood then; §70
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
+
+### 87 · A cost center is a dimension a line carries
+
+**Built 2026-09-15**, the last of the Priority 2 statements item, from the five
+decisions taken that day — all as recommended.
+
+**What exists now.** `ledger::CostCenter`, an aggregate like an account
+(`ledger.cost_center.opened/renamed/closed`; a closed one refuses lines), with
+`open_cost_center` refusing an open branch's id as a duplicate because a branch
+*is* a cost center. `Line.cost_center: Option<AggregateId>` (serde default, no
+upcaster), checked per line in the one posting path — an open cost center, or
+an open branch through the branches log, else 422 `ledger.no_such_cost_center`
+/ `ledger.cost_center_closed`. The posting row's `cost_center` is what the line
+named **or the entry's branch**, decided in the projection so old entries land
+in their branch on the rebuild — read-model **version 3**, pin updated. A
+reversal keeps the line's cost center. `cost_center` table and `CostCenters`
+projection; `cost_centers` listing; `profit_and_loss` takes `cost_center`;
+`profit_and_loss_by_cost_center` gives one row per (cost center, account),
+unassigned last; `JournalFilter.cost_center`, `JournalLine.cost_center`.
+
+**Who carries one.** Manual entries (`NewEntryLine.cost_center`) and purchase
+bill lines (`BillLine.cost_center`, `NewBillLine.cost_center`, threaded through
+`entry_for_bill`); everything else defaults to the branch, as decided.
+
+**Routes.** `GET`/`POST /v1/ledger/cost-centers`, `PUT …/{id}` (rename), `POST
+…/{id}/close`, `GET /v1/ledger/statements/profit-and-loss/by-cost-center`
+(one column per cost center, the same per-currency shape inside each), and
+`?cost_center=` on the P&L and the journal beside `?branch=`. Confinement
+untouched: a confined member's reads stay pinned to `posting.branch`.
+
+**Guards, all falsified** (revert → the named test fails → restore): the
+per-line check removed; a line no longer falling to its branch; a reversal
+dropping the cost center; a bill line dropping its cost center; a branch's id
+opened as a cost center. Three tests: the ledger module (every rule: naming,
+the branch default, unassigned, unknown, closed, the branch as a cost center,
+the reversal, both cuts, the journal filter and the list); purchases (a bill
+line charges its department, the other is unassigned); HTTP (every route and
+both refusals, the by-cost-center order with unassigned last).
 
 ### 86 · FX is deferred, and a Saudi tax document is in riyals
 

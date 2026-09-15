@@ -17,6 +17,12 @@ pub struct Line {
     pub amount: Money,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memo: Option<String>,
+    /// **The dimension a profit and loss is cut by** — see
+    /// [`CostCenter`](crate::CostCenter). Absent, the line takes the entry's
+    /// branch when it is projected; absent on every line written before cost
+    /// centers existed, which is what the default is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_center: Option<AggregateId>,
 }
 
 impl Line {
@@ -26,12 +32,19 @@ impl Line {
             account,
             amount,
             memo: None,
+            cost_center: None,
         }
     }
 
     #[must_use]
     pub fn with_memo(mut self, memo: impl Into<String>) -> Self {
         self.memo = Some(memo.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_cost_center(mut self, cost_center: Option<AggregateId>) -> Self {
+        self.cost_center = cost_center;
         self
     }
 

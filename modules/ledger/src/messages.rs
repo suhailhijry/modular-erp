@@ -9,6 +9,12 @@ pub const ACCOUNT_CLOSED: MessageCode = MessageCode::new("ledger.account_closed"
 pub const ALREADY_POSTED: MessageCode = MessageCode::new("ledger.already_posted");
 pub const NO_SUCH_ENTRY: MessageCode = MessageCode::new("ledger.no_such_entry");
 pub const NO_SUCH_BRANCH: MessageCode = MessageCode::new("ledger.no_such_branch");
+/// A cost center opened under a code already open. 409.
+pub const COST_CENTER_EXISTS: MessageCode = MessageCode::new("ledger.cost_center_exists");
+/// A line naming a cost center that is neither open nor an open branch. 422.
+pub const NO_SUCH_COST_CENTER: MessageCode = MessageCode::new("ledger.no_such_cost_center");
+/// A line naming a closed cost center. 422.
+pub const COST_CENTER_CLOSED: MessageCode = MessageCode::new("ledger.cost_center_closed");
 pub const ALREADY_REVERSED: MessageCode = MessageCode::new("ledger.already_reversed");
 pub const TOO_FEW_LINES: MessageCode = MessageCode::new("ledger.too_few_lines");
 pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("ledger.mixed_currencies");
@@ -62,6 +68,9 @@ pub static CODES: &[MessageCode] = &[
     ALREADY_POSTED,
     NO_SUCH_ENTRY,
     NO_SUCH_BRANCH,
+    COST_CENTER_EXISTS,
+    NO_SUCH_COST_CENTER,
+    COST_CENTER_CLOSED,
     ALREADY_REVERSED,
     TOO_FEW_LINES,
     MIXED_CURRENCIES,
@@ -467,5 +476,35 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
             "أرقام دفتر الأستاذ متأخرة عن السجل بـ {behind} حدثًا، فلا يمكن إقفال السنة دفتريًا \
              بعد. حاول بعد قليل.",
         ),
+    ),
+    (
+        COST_CENTER_EXISTS,
+        Locale::English,
+        Template::Simple("Cost center {id} is already open."),
+    ),
+    (
+        COST_CENTER_EXISTS,
+        Locale::Arabic,
+        Template::Simple("مركز التكلفة {id} مفتوح بالفعل."),
+    ),
+    (
+        NO_SUCH_COST_CENTER,
+        Locale::English,
+        Template::Simple("There is no open cost center or branch {id}."),
+    ),
+    (
+        NO_SUCH_COST_CENTER,
+        Locale::Arabic,
+        Template::Simple("لا يوجد مركز تكلفة أو فرع مفتوح باسم {id}."),
+    ),
+    (
+        COST_CENTER_CLOSED,
+        Locale::English,
+        Template::Simple("Cost center {id} is closed and cannot take new lines."),
+    ),
+    (
+        COST_CENTER_CLOSED,
+        Locale::Arabic,
+        Template::Simple("مركز التكلفة {id} مقفل ولا يقبل بنودًا جديدة."),
     ),
 ];

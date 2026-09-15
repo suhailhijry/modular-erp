@@ -51,6 +51,7 @@ fn line(account: &str, net: Money, category: VatCategory, tax: Money) -> BillLin
         category,
         rate_bp: ledger::Rates::saudi_arabia().of(category),
         tax,
+        cost_center: None,
     }
 }
 
@@ -1272,6 +1273,69 @@ async fn a_line_naming_a_product_nobody_declared_is_refused() {
     // And nothing was written: not the bill, not a posting.
     assert_eq!(fixture.balance("2000").await, money(0));
     assert_eq!(fixture.balance("5010").await, money(0));
+
+    fixture.cleanup().await;
+}
+
+/// **A bill line charges its cost center**, and one that names none takes the
+/// bill's branch — here none, so it is unassigned. The department is on the
+/// line, because one bill routinely covers two.
+#[tokio::test]
+async fn a_bill_line_charges_its_cost_center() {
+    let fixture = Fixture::new().await;
+    ledger::open_cost_center(
+        &fixture.db,
+        &code("marketing"),
+        "Marketing",
+        &Metadata::default(),
+    )
+    .await
+    .expect("opens");
+    let mut for_marketing = line("5000", riyals(100), VatCategory::Standard, riyals(15));
+    for_marketing.cost_center = Some(code("marketing"));
+    record_bill(
+        &fixture.db,
+        &code("BILL-MKT"),
+        &draft(vec![
+            for_marketing,
+            line("5000", riyals(50), VatCategory::Standard, riyals(7)),
+        ]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("records");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let marketing = ledger::profit_and_loss(
+        &mut conn,
+        on("2026-01-01"),
+        on("2027-01-01"),
+        None,
+        Some("marketing"),
+    )
+    .await
+    .expect("reads");
+    let expense = marketing
+        .iter()
+        .find(|l| l.code == "5000")
+        .expect("shown")
+        .balance;
+    assert_eq!(
+        expense,
+        riyals(100),
+        "the marketing line, net of reclaimable tax"
+    );
+    let columns =
+        ledger::profit_and_loss_by_cost_center(&mut conn, on("2026-01-01"), on("2027-01-01"), None)
+            .await
+            .expect("reads");
+    let unassigned = columns
+        .iter()
+        .find(|c| c.cost_center.is_none())
+        .expect("the other line has no department");
+    assert_eq!(unassigned.line.balance, riyals(50));
+    drop(conn);
 
     fixture.cleanup().await;
 }

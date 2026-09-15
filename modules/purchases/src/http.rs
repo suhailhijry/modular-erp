@@ -106,6 +106,10 @@ struct NewSupplier {
 #[derive(Debug, Deserialize, ToSchema)]
 struct NewBillLine {
     description: String,
+    /// Which department this was for: a cost center from
+    /// `GET /v1/ledger/cost-centers`, or a branch. Absent, the bill's branch.
+    #[serde(default)]
+    cost_center: Option<String>,
     /// The expense or asset account this lands in. One bill routinely covers
     /// several. **Ignored when `product` names a stocked product** — that line
     /// lands in the goods-received-not-invoiced account the delivery credited.
@@ -294,6 +298,11 @@ async fn record_bill(
         lines.push(crate::BillLine {
             description: line.description,
             account: parse_id(&line.account, locale)?,
+            cost_center: line
+                .cost_center
+                .as_deref()
+                .map(|center| parse_id(center, locale))
+                .transpose()?,
             product: line
                 .product
                 .as_deref()

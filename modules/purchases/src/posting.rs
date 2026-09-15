@@ -107,7 +107,9 @@ pub fn entry_for_bill(
         // A zero line is not a posting and the ledger refuses one, so a line
         // that comes to nothing is left out rather than sent to be rejected.
         if !cost.is_zero() {
-            entry.push(Line::new(line.account.clone(), cost));
+            entry.push(
+                Line::new(line.account.clone(), cost).with_cost_center(line.cost_center.clone()),
+            );
         }
     }
 
@@ -162,6 +164,7 @@ mod tests {
             category,
             rate_bp: ledger::Rates::saudi_arabia().of(category),
             tax: money(tax),
+            cost_center: None,
         }
     }
 

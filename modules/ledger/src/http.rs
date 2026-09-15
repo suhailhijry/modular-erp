@@ -52,6 +52,10 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(close_year))
         .routes(routes!(reopen_year))
         .routes(routes!(closing_accounts, set_closing_accounts))
+        .routes(routes!(list_cost_centers, open_cost_center))
+        .routes(routes!(rename_cost_center))
+        .routes(routes!(close_cost_center))
+        .routes(routes!(profit_and_loss_by_cost_center))
         .routes(routes!(balances))
         .routes(routes!(profit_and_loss))
         .routes(routes!(balance_sheet))
@@ -139,6 +143,11 @@ struct NewEntryLine {
     amount: Amount,
     #[serde(default)]
     memo: Option<String>,
+    /// Which department this line is for: a cost center from
+    /// `GET /v1/ledger/cost-centers`, or an open branch. Absent, the entry's
+    /// branch.
+    #[serde(default)]
+    cost_center: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -314,6 +323,11 @@ async fn post_entry(
         let account = parse_id(&line.account, locale)?;
         let mut parsed = Line::new(account, line.amount.parse(locale)?);
         parsed.memo.clone_from(&line.memo);
+        parsed.cost_center = line
+            .cost_center
+            .as_deref()
+            .map(|center| parse_id(center, locale))
+            .transpose()?;
         lines.push(parsed);
     }
 
@@ -569,6 +583,7 @@ struct RangeQuery {
     until: Option<Timestamp>,
     period: Option<String>,
     branch: Option<String>,
+    cost_center: Option<String>,
     #[serde(default)]
     all: bool,
 }
@@ -616,7 +631,57 @@ struct ProfitAndLossView {
     period: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_center: Option<String>,
     currencies: Vec<ProfitAndLossCurrency>,
+}
+
+/// One cost center's column of the profit and loss.
+#[derive(Debug, Serialize, ToSchema)]
+struct CostCenterColumn {
+    /// `null` for lines that named none and had no branch to fall to.
+    cost_center: Option<String>,
+    currencies: Vec<ProfitAndLossCurrency>,
+}
+
+/// The profit and loss cut by cost center.
+#[derive(Debug, Serialize, ToSchema)]
+struct ProfitAndLossByCostCenterView {
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    from: Timestamp,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    until: Timestamp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    period: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    /// Ordered by cost center; the unassigned column, when there is one, last.
+    cost_centers: Vec<CostCenterColumn>,
+}
+
+/// A cost center as the list shows it.
+#[derive(Debug, Serialize, ToSchema)]
+struct CostCenterView {
+    id: String,
+    name: String,
+    closed: bool,
+    /// Lines that named it, or fell to it as their entry's branch.
+    postings: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "id": "marketing", "name": "التسويق" }))]
+struct NewCostCenter {
+    /// Yours, and the same namespace as branches: a branch is a cost center
+    /// already, so its id cannot be opened as one.
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "name": "Marketing" }))]
+struct CostCenterName {
+    name: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -657,6 +722,9 @@ struct JournalLineView {
     credit: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     memo: Option<String>,
+    /// What the line named, or the entry's branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_center: Option<String>,
 }
 
 /// One entry with its lines, as the journal lists it.
@@ -684,6 +752,7 @@ struct JournalQuery {
     until: Option<Timestamp>,
     account: Option<String>,
     branch: Option<String>,
+    cost_center: Option<String>,
     #[serde(flatten)]
     page: After,
 }
@@ -1002,6 +1071,7 @@ fn natural(line: crate::StatementLine) -> StatementLineView {
         ("from" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Inclusive."),
         ("until" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Exclusive."),
         ("branch" = Option<String>, Query, description = "One branch's postings. Absent means the company; a confined member gets their branch."),
+        ("cost_center" = Option<String>, Query, description = "One cost center's lines — a cost center or a branch. Beside `branch`, not instead of it: a confined member still sees only their branch."),
         ("all" = Option<bool>, Query, description = "Include accounts with nothing in the range."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),
@@ -1038,15 +1108,33 @@ async fn profit_and_loss(
         locale,
     )
     .await?;
-    let lines = crate::profit_and_loss(&mut conn, from, until, branch.as_deref())
-        .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let lines = crate::profit_and_loss(
+        &mut conn,
+        from,
+        until,
+        branch.as_deref(),
+        query.cost_center.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
+    Ok(Json(ProfitAndLossView {
+        from,
+        until,
+        period: query.period,
+        branch,
+        cost_center: query.cost_center,
+        currencies: currencies_of(lines, query.all),
+    }))
+}
+
+/// One profit and loss per currency, from the trading lines.
+fn currencies_of(lines: Vec<crate::StatementLine>, all: bool) -> Vec<ProfitAndLossCurrency> {
     let mut by_currency: std::collections::BTreeMap<String, ProfitAndLossCurrency> =
         std::collections::BTreeMap::new();
     for line in lines {
-        if !query.all && line.postings == 0 && line.balance.minor() == 0 {
+        if !all && line.postings == 0 && line.balance.minor() == 0 {
             continue;
         }
         let currency = line.balance.currency().to_string();
@@ -1072,12 +1160,94 @@ async fn profit_and_loss(
         }
         statement.result = statement.total_revenue - statement.total_expenses;
     }
-    Ok(Json(ProfitAndLossView {
+    by_currency.into_values().collect()
+}
+
+/// The profit and loss cut by cost center.
+///
+/// One column per cost center — what its lines named, or the branch they fell
+/// to — with the same shape as `profit-and-loss` inside each, and lines that
+/// had neither last, unassigned. The same range and branch parameters;
+/// closing entries left out the same way. The balance sheet has no such cut,
+/// because a cost center's books do not balance on their own.
+#[utoipa::path(
+    get,
+    path = "/v1/ledger/statements/profit-and-loss/by-cost-center",
+    tag = "ledger",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("period" = Option<String>, Query, description = "A period of the fiscal calendar, `2026-P03`. Instead of `from` and `until`."),
+        ("from" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Inclusive."),
+        ("until" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Exclusive."),
+        ("branch" = Option<String>, Query, description = "One branch's postings. Absent means the company; a confined member gets their branch."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, body = ProfitAndLossByCostCenterView),
+        (status = BAD_REQUEST, description = "No range, or a backwards one — `ledger.not_a_range`; a period this calendar does not have — `ledger.no_such_period`", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn profit_and_loss_by_cost_center(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(query): Query<RangeQuery>,
+) -> Result<Json<ProfitAndLossByCostCenterView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+    let branch = tenant.branch_scope(query.branch.as_deref(), locale)?;
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let (from, until) = range_of(
+        &mut conn,
+        query.period.as_deref(),
+        query.from,
+        query.until,
+        locale,
+    )
+    .await?;
+    let rows = crate::profit_and_loss_by_cost_center(&mut conn, from, until, branch.as_deref())
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    drop(conn);
+
+    // Rows arrive ordered by cost center, unassigned last; keep that order.
+    let mut columns: Vec<CostCenterColumn> = Vec::new();
+    let mut lines: Vec<crate::StatementLine> = Vec::new();
+    let mut current: Option<Option<String>> = None;
+    for row in rows {
+        if current.as_ref() != Some(&row.cost_center) {
+            if let Some(cost_center) = current.take() {
+                columns.push(CostCenterColumn {
+                    cost_center,
+                    currencies: currencies_of(std::mem::take(&mut lines), false),
+                });
+            }
+            current = Some(row.cost_center.clone());
+        }
+        lines.push(row.line);
+    }
+    if let Some(cost_center) = current {
+        columns.push(CostCenterColumn {
+            cost_center,
+            currencies: currencies_of(lines, false),
+        });
+    }
+    Ok(Json(ProfitAndLossByCostCenterView {
         from,
         until,
         period: query.period,
         branch,
-        currencies: by_currency.into_values().collect(),
+        cost_centers: columns,
     }))
 }
 
@@ -1248,6 +1418,7 @@ fn journal_record(entry: crate::JournalEntryView) -> JournalEntryRecord {
                 debit: l.amount.minor().max(0),
                 credit: (-l.amount.minor()).max(0),
                 memo: l.memo,
+                cost_center: l.cost_center,
             })
             .collect(),
     }
@@ -1267,6 +1438,7 @@ fn journal_record(entry: crate::JournalEntryView) -> JournalEntryRecord {
         ("until" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Exclusive."),
         ("account" = Option<String>, Query, description = "Entries with a line on this account."),
         ("branch" = Option<String>, Query, description = "One branch's entries. A confined member gets their branch."),
+        ("cost_center" = Option<String>, Query, description = "Entries with a line in this cost center."),
         ("after" = Option<String>, Query, description = "From a previous page's `next`."),
         ("limit" = Option<i64>, Query, description = "Entries per page. Clamped, never refused."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
@@ -1304,6 +1476,7 @@ async fn list_entries(
             until: query.until,
             account: query.account.as_deref(),
             branch: branch.as_deref(),
+            cost_center: query.cost_center.as_deref(),
         },
         query.page.limit(50, 200),
         after.as_ref(),
@@ -1374,11 +1547,14 @@ fn ledger_problem(error: &CommandError<crate::LedgerError>, locale: Locale) -> P
                 // Both mean "look at what is there now and decide again": a
                 // code somebody else took, and an entry somebody else undid.
                 crate::LedgerError::AccountExists(_)
+                | crate::LedgerError::CostCenterExists(_)
                 | crate::LedgerError::AlreadyReversed { .. } => StatusCode::CONFLICT,
                 // Well-formed, but refers to something that is not there — or
                 // to a period nobody may write into any more.
                 crate::LedgerError::NoSuchAccount(_)
                 | crate::LedgerError::AccountClosed(_)
+                | crate::LedgerError::NoSuchCostCenter(_)
+                | crate::LedgerError::CostCenterClosed(_)
                 | crate::LedgerError::NoSuchEntry(_)
                 | crate::LedgerError::PeriodClosed { .. } => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::BAD_REQUEST,
@@ -1870,6 +2046,164 @@ async fn set_closing_accounts(
     )
     .await
     .map_err(|e| config_problem(&e, locale))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Cost centers
+// ---------------------------------------------------------------------------
+
+/// The cost centers opened as such, with how much has landed in each.
+///
+/// Every open branch is a cost center too and is not listed here — read
+/// `GET /v1/branches` for those. A line that names neither lands in its
+/// entry's branch.
+#[utoipa::path(
+    get,
+    path = "/v1/ledger/cost-centers",
+    tag = "ledger",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, body = Vec<CostCenterView>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn list_cost_centers(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+) -> Result<Json<Vec<CostCenterView>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let centers = crate::cost_centers(&mut conn)
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    Ok(Json(
+        centers
+            .into_iter()
+            .map(|c| CostCenterView {
+                id: c.id,
+                name: c.name,
+                closed: c.closed,
+                postings: c.postings,
+            })
+            .collect(),
+    ))
+}
+
+/// Open a cost center.
+///
+/// A department, a project — whatever the business wants the result of. A
+/// line of a journal entry or a purchase bill may then name it.
+#[utoipa::path(
+    post,
+    path = "/v1/ledger/cost-centers",
+    tag = "ledger",
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
+    request_body = NewCostCenter,
+    responses(
+        (status = CREATED, description = "Opened."),
+        (status = BAD_REQUEST, description = "An unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "That id is already open — `ledger.cost_center_exists`", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn open_cost_center(
+    tenant: Allowed<ManageAccounts>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Json(body): Json<NewCostCenter>,
+) -> Result<impl IntoResponse, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let id = parse_id(&body.id, locale)?;
+    crate::open_cost_center(&tenant.db, &id, &body.name, &metadata(&tenant))
+        .await
+        .map_err(|e| ledger_problem(&e, locale))?;
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(StatusCode::CREATED)
+}
+
+/// Rename a cost center. A no-op when the name already matches.
+#[utoipa::path(
+    put,
+    path = "/v1/ledger/cost-centers/{cost_center}",
+    tag = "ledger",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("cost_center" = String, Path, description = "Its id."),
+    ),
+    request_body = CostCenterName,
+    responses(
+        (status = NO_CONTENT, description = "Renamed."),
+        (status = BAD_REQUEST, description = "An unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "No such cost center — `ledger.no_such_cost_center`", body = Problem),
+    ),
+)]
+async fn rename_cost_center(
+    tenant: Allowed<ManageAccounts>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(cost_center): Path<String>,
+    Json(body): Json<CostCenterName>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let id = parse_id(&cost_center, locale)?;
+    crate::rename_cost_center(&tenant.db, &id, &body.name, &metadata(&tenant))
+        .await
+        .map_err(|e| ledger_problem(&e, locale))?;
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Close a cost center. Its history stays; new lines are refused.
+#[utoipa::path(
+    post,
+    path = "/v1/ledger/cost-centers/{cost_center}/close",
+    tag = "ledger",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("cost_center" = String, Path, description = "Its id."),
+    ),
+    responses(
+        (status = NO_CONTENT, description = "Closed, or already was."),
+        (status = BAD_REQUEST, description = "An unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "No such cost center — `ledger.no_such_cost_center`", body = Problem),
+    ),
+)]
+async fn close_cost_center(
+    tenant: Allowed<ManageAccounts>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(cost_center): Path<String>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let id = parse_id(&cost_center, locale)?;
+    crate::close_cost_center(&tenant.db, &id, &metadata(&tenant))
+        .await
+        .map_err(|e| ledger_problem(&e, locale))?;
+    nudge(&state, tenant.db.tenant()).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

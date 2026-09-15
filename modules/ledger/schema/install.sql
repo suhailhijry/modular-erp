@@ -27,6 +27,16 @@ CREATE TABLE IF NOT EXISTS account (
 
 CREATE INDEX IF NOT EXISTS account_kind_idx ON account (kind) WHERE NOT closed;
 
+-- What a profit and loss is cut by. Only the ones opened as such: an open
+-- branch is a cost center too, and a report that wants its *name* reads the
+-- branches group beside this one (L3).
+CREATE TABLE IF NOT EXISTS cost_center (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    closed     BOOLEAN NOT NULL DEFAULT false,
+    opened_at  TIMESTAMPTZ NOT NULL
+);
+
 -- One row per line of every entry. The ledger's detail, and what everything
 -- else is summed from.
 CREATE TABLE IF NOT EXISTS posting (
@@ -56,6 +66,11 @@ CREATE TABLE IF NOT EXISTS posting (
     -- counted everywhere else. See `period::close_year`.
     closing     BOOLEAN NOT NULL DEFAULT false,
 
+    -- **The line's cost center**: what it named, or the entry's branch when it
+    -- named none. Null only on a line with neither. No foreign key, for the
+    -- reason `branch` has none.
+    cost_center TEXT,
+
     occurred_on TIMESTAMPTZ NOT NULL,
     -- The event's own timestamp, never `now()` — see architecture L2.
     recorded_at TIMESTAMPTZ NOT NULL,
@@ -65,6 +80,7 @@ CREATE TABLE IF NOT EXISTS posting (
 
 CREATE INDEX IF NOT EXISTS posting_by_account_idx ON posting (account, occurred_on);
 CREATE INDEX IF NOT EXISTS posting_by_entry_idx ON posting (entry_id);
+CREATE INDEX IF NOT EXISTS posting_by_cost_center_idx ON posting (cost_center, occurred_on);
 
 -- ---------------------------------------------------------------------------
 -- Balances are views, not tables.

@@ -90,6 +90,10 @@ pub struct BillLine {
     pub rate_bp: i32,
     /// The tax the supplier charged on this line.
     pub tax: Money,
+    /// **Which department this was for** — a cost center the ledger knows, or
+    /// an open branch. Absent, the line takes the bill's branch when posted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_center: Option<erp_types::AggregateId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

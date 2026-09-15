@@ -70,6 +70,7 @@ pub struct BillLine {
     pub category: VatCategory,
     pub rate_bp: i32,              // the rate the supplier charged
     pub tax: Money,                // the tax the supplier charged
+    pub cost_center: Option<AggregateId>, // which department; absent, the bill's branch
 }
 
 pub enum BillEvent { Received { … }, Paid { … } }

@@ -1,0 +1,63 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.entry_id as \"entry_id!\",\n                  min(p.occurred_on) as \"occurred_on!\",\n                  min(p.recorded_at) as \"recorded_at!\",\n                  min(p.branch) as branch,\n                  bool_or(p.closing) as \"closing!\"\n             FROM proj_ledger.posting p\n            WHERE ($1::timestamptz IS NULL OR p.occurred_on >= $1)\n              AND ($2::timestamptz IS NULL OR p.occurred_on < $2)\n              AND ($3::text IS NULL OR p.branch = $3)\n              AND ($4::text IS NULL OR p.entry_id IN (\n                      SELECT entry_id FROM proj_ledger.posting WHERE account = $4))\n              AND ($8::text IS NULL OR p.entry_id IN (\n                      SELECT entry_id FROM proj_ledger.posting WHERE cost_center = $8))\n              AND ($5::timestamptz IS NULL OR (p.occurred_on, p.entry_id) < ($5, $6))\n            GROUP BY p.entry_id\n            ORDER BY min(p.occurred_on) DESC, p.entry_id DESC\n            LIMIT $7",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entry_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.posting",
+            "name": "entry_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "occurred_on!",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "recorded_at!",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "closing!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "d8a7c917a7222634d00c2459d5f5c4bb03d5adc8ee7592e7a752fdf5d60d962e"
+}

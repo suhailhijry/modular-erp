@@ -254,6 +254,7 @@ impl Fixture {
                     category: VatCategory::Standard,
                     rate_bp: 1_500,
                     tax,
+                    cost_center: None,
                 }],
                 note: String::new(),
             },

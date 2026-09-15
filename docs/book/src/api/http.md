@@ -1239,6 +1239,10 @@ now on* and *this week*.
 | `POST /v1/ledger/years/{year}/close` | Book it into retained earnings | ManageAccounts |
 | `POST /v1/ledger/years/{year}/reopen` | Reverse its closing entries | ManageAccounts |
 | `GET` / `PUT /v1/ledger/closing-accounts` | Where each currency's result goes | Read / ManageAccounts |
+| `GET` / `POST /v1/ledger/cost-centers` | The cost centers; open one | Read / ManageAccounts |
+| `PUT /v1/ledger/cost-centers/{id}` | Rename one | ManageAccounts |
+| `POST /v1/ledger/cost-centers/{id}/close` | Close one | ManageAccounts |
+| `GET /v1/ledger/statements/profit-and-loss/by-cost-center` | One P&L column per cost center | Read |
 | `GET /v1/ledger/vat-rates` | What this business charges | Read |
 | `PUT /v1/ledger/vat-rates` | Set it | ManageAccounts |
 
@@ -1309,6 +1313,18 @@ curl -sX POST "${AUTH[@]}" http://localhost:8080/v1/ledger/years/2025/close
 ```
 
 `…/reopen` reverses them; a booked year's periods reopen only after the year.
+
+A cost center is what a profit and loss is cut by — a department, a project.
+Open one, then name it on a line of a journal entry or a purchase bill; a line
+that names none takes the entry's branch, and every open branch is a cost
+center already.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/ledger/cost-centers -d '{"id":"marketing","name":"التسويق"}'
+curl -s "${AUTH[@]}" "http://localhost:8080/v1/ledger/statements/profit-and-loss?period=2026-P03&cost_center=marketing"
+curl -s "${AUTH[@]}" "http://localhost:8080/v1/ledger/statements/profit-and-loss/by-cost-center?period=2026-P03"
+```
 
 ## Sales
 

@@ -610,6 +610,7 @@ mod tests {
             category,
             rate_bp: ledger::Rates::saudi_arabia().of(category),
             tax: money(tax),
+            cost_center: None,
         }
     }
     fn draft(lines: Vec<BillLine>) -> Draft {

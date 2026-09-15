@@ -7,6 +7,7 @@ use erp_types::{AggregateId, CurrencyCode, Timestamp};
 
 use crate::account::{Account, AccountEvent, AccountKind};
 use crate::charts::{Chart, Installed};
+use crate::cost_center::{CostCenter, CostCenterEvent};
 use crate::entry::{JournalEntry, JournalEntryEvent};
 use crate::lines::{BalancedLines, Unbalanced};
 
@@ -24,6 +25,13 @@ pub enum LedgerError {
     NoSuchEntry(String),
     #[error("there is no open branch {0}")]
     NoSuchBranch(String),
+    #[error("cost center {0} already exists")]
+    CostCenterExists(String),
+    /// Neither an open cost center nor an open branch.
+    #[error("there is no open cost center or branch {0}")]
+    NoSuchCostCenter(String),
+    #[error("cost center {0} is closed")]
+    CostCenterClosed(String),
     #[error("entry {entry} was already reversed by {by}")]
     AlreadyReversed { entry: String, by: String },
     /// A year's closing entry is undone by reopening the year, which reverses
@@ -81,6 +89,15 @@ impl erp_i18n::Localize for LedgerError {
             }
             Self::NoSuchBranch(id) => {
                 Message::new(messages::NO_SUCH_BRANCH).with("branch", MessageArg::text(id.clone()))
+            }
+            Self::CostCenterExists(id) => {
+                Message::new(messages::COST_CENTER_EXISTS).with("id", MessageArg::text(id.clone()))
+            }
+            Self::NoSuchCostCenter(id) => {
+                Message::new(messages::NO_SUCH_COST_CENTER).with("id", MessageArg::text(id.clone()))
+            }
+            Self::CostCenterClosed(id) => {
+                Message::new(messages::COST_CENTER_CLOSED).with("id", MessageArg::text(id.clone()))
             }
             Self::AlreadyReversed { by, .. } => {
                 Message::new(messages::ALREADY_REVERSED).with("by", MessageArg::text(by.clone()))
@@ -365,6 +382,9 @@ async fn post_in(
                 },
             )));
         }
+        if let Some(cost_center) = &line.cost_center {
+            accepts_cost_center(&mut *conn, cost_center).await?;
+        }
     }
 
     let memo = memo.trim().to_owned();
@@ -550,6 +570,8 @@ async fn reverse_as(
                     .checked_neg()
                     .map_err(|e| ExecuteError::Rejected(LedgerError::Unbalanced(e.into())))?,
                 memo: line.memo.clone(),
+                // Charged back to the department it was charged to.
+                cost_center: line.cost_center.clone(),
             })
         })
         .collect::<Result<Vec<_>, ExecuteError<LedgerError>>>()?;
@@ -706,4 +728,109 @@ pub async fn install_chart(
     let installed = install_chart_in(&mut tx, chart, currency, locale, metadata).await?;
     tx.commit().await.map_err(ExecuteError::from)?;
     Ok(installed)
+}
+
+// ---------------------------------------------------------------------------
+// Cost centers
+// ---------------------------------------------------------------------------
+
+/// Opens a cost center. Idempotent by refusal, like [`open_account`] — and
+/// an open branch's id is refused the same way, because a branch is a cost
+/// center already and a second one under its name would shadow it.
+pub async fn open_cost_center(
+    db: &TenantDb,
+    id: &AggregateId,
+    name: &str,
+    metadata: &Metadata,
+) -> Outcome<CostCenterEvent> {
+    let name = name.trim().to_owned();
+    let mut conn = db.acquire().await?;
+    if branches::accepts_documents(&mut conn, id)
+        .await
+        .map_err(|e| CommandError::Execute(ExecuteError::Load(e)))?
+    {
+        return Err(
+            ExecuteError::Rejected(LedgerError::CostCenterExists(id.as_str().to_owned())).into(),
+        );
+    }
+    drop(conn);
+    db.execute::<CostCenter, _, LedgerError>(id, crate::upcasters(), metadata, |loaded| {
+        if loaded.aggregate.exists {
+            return Err(LedgerError::CostCenterExists(id.as_str().to_owned()));
+        }
+        Ok(Decision::one(CostCenterEvent::Opened {
+            name: name.clone(),
+        }))
+    })
+    .await
+}
+
+/// Renames a cost center. A no-op if the name already matches.
+pub async fn rename_cost_center(
+    db: &TenantDb,
+    id: &AggregateId,
+    name: &str,
+    metadata: &Metadata,
+) -> Outcome<CostCenterEvent> {
+    let name = name.trim().to_owned();
+    db.execute::<CostCenter, _, LedgerError>(id, crate::upcasters(), metadata, |loaded| {
+        if !loaded.aggregate.exists {
+            return Err(LedgerError::NoSuchCostCenter(id.as_str().to_owned()));
+        }
+        if loaded.aggregate.name == name {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(CostCenterEvent::Renamed {
+            name: name.clone(),
+        }))
+    })
+    .await
+}
+
+/// Closes a cost center. Its history stays; new lines are refused. A no-op
+/// if it is already closed.
+pub async fn close_cost_center(
+    db: &TenantDb,
+    id: &AggregateId,
+    metadata: &Metadata,
+) -> Outcome<CostCenterEvent> {
+    db.execute::<CostCenter, _, LedgerError>(id, crate::upcasters(), metadata, |loaded| {
+        if !loaded.aggregate.exists {
+            return Err(LedgerError::NoSuchCostCenter(id.as_str().to_owned()));
+        }
+        if loaded.aggregate.closed {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(CostCenterEvent::Closed))
+    })
+    .await
+}
+
+/// **Whether a line may name this cost center right now** — an open cost
+/// center, or an open branch, which is a cost center without being opened.
+/// Read from the log for the reason [`accepts_postings`] is: a branch or a
+/// center opened a moment ago is not in any read model yet.
+async fn accepts_cost_center(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+) -> Result<(), ExecuteError<LedgerError>> {
+    let center = erp_eventlog::load::<CostCenter>(&mut *conn, id, crate::upcasters()).await?;
+    if center.aggregate.exists {
+        return if center.aggregate.accepts_lines() {
+            Ok(())
+        } else {
+            Err(ExecuteError::Rejected(LedgerError::CostCenterClosed(
+                id.as_str().to_owned(),
+            )))
+        };
+    }
+    if branches::accepts_documents(&mut *conn, id)
+        .await
+        .map_err(ExecuteError::Load)?
+    {
+        return Ok(());
+    }
+    Err(ExecuteError::Rejected(LedgerError::NoSuchCostCenter(
+        id.as_str().to_owned(),
+    )))
 }
