@@ -549,7 +549,9 @@ async fn two_workers_do_not_double_apply_a_tenants_events() {
 /// A job that fails stops its tenant and leaves the worker running.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failing_job_stalls_one_tenant_without_taking_the_worker_down() {
-    struct AlwaysFails;
+    struct AlwaysFails {
+        attempts: Arc<AtomicUsize>,
+    }
 
     #[async_trait::async_trait]
     impl Job for AlwaysFails {
@@ -560,6 +562,7 @@ async fn a_failing_job_stalls_one_tenant_without_taking_the_worker_down() {
             &self,
             _db: &erp_control::TenantDb,
         ) -> Result<Activity, erp_worker::BoxError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
             Err("upstream is on fire".into())
         }
     }
@@ -580,8 +583,11 @@ async fn a_failing_job_stalls_one_tenant_without_taking_the_worker_down() {
             empty_claim_pause: Duration::from_millis(5),
             ..WorkerConfig::default()
         },
-    )
-    .with_job(Arc::new(AlwaysFails));
+    );
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let worker = worker.with_job(Arc::new(AlwaysFails {
+        attempts: Arc::clone(&attempts),
+    }));
 
     let cancel = CancellationToken::new();
     let run = {
@@ -589,7 +595,11 @@ async fn a_failing_job_stalls_one_tenant_without_taking_the_worker_down() {
         tokio::spawn(async move { worker.run(cancel).await })
     };
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Until the job has failed once, not for a fixed while.
+    wait_until(Duration::from_secs(10), || async {
+        attempts.load(Ordering::SeqCst) > 0
+    })
+    .await;
     cancel.cancel();
     let shutdown = run.await.expect("joins");
 

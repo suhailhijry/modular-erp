@@ -8,6 +8,7 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -731,13 +732,19 @@ async fn a_tenant_is_visited_by_one_visit_at_a_time() {
         let cancel = cancel.clone();
         tokio::spawn(async move { worker.run(cancel).await })
     };
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Three visits, however long they take on a loaded machine: what is
+    // measured is that a worked tenant is re-claimed, and that no two visits
+    // of it overlap.
+    wait_until(Duration::from_secs(10), || async {
+        ticks.load(Ordering::SeqCst) >= 3
+    })
+    .await;
     cancel.cancel();
     let shutdown = run.await.expect("joins");
 
     assert!(
         ticks.load(Ordering::SeqCst) >= 3,
-        "the tenant was visited {} times in 600ms; the loop is not re-claiming a worked tenant",
+        "the tenant was visited {} times; the loop is not re-claiming a worked tenant",
         ticks.load(Ordering::SeqCst)
     );
     assert_eq!(
@@ -826,7 +833,19 @@ async fn a_tenant_being_suspended_runs_only_its_drain_jobs_and_is_suspended_once
         let cancel = cancel.clone();
         tokio::spawn(async move { worker.run(cancel).await })
     };
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Until the drain has finished and the tenant moved on, not for a fixed
+    // while — see `one_failing_job_does_not_stall_the_others`.
+    wait_until(Duration::from_secs(10), || async {
+        fixture
+            .control
+            .tenant(tenant)
+            .await
+            .expect("reads")
+            .expect("exists")
+            .status
+            == erp_control::TenantStatus::Suspended
+    })
+    .await;
     cancel.cancel();
     let shutdown = run.await.expect("joins");
     assert_eq!(shutdown.failed_visits, 0);
@@ -922,7 +941,13 @@ async fn one_failing_job_does_not_stall_the_others() {
         let cancel = cancel.clone();
         tokio::spawn(async move { worker.run(cancel).await })
     };
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Until the job after the failing one has run, not for a fixed while: a
+    // fixed 300 ms missed the first visit under a loaded full run (2026-09-16)
+    // and said nothing about the code.
+    wait_until(Duration::from_secs(10), || async {
+        ticks.load(Ordering::SeqCst) > 0
+    })
+    .await;
     cancel.cancel();
     let shutdown = run.await.expect("joins");
 
@@ -1117,4 +1142,28 @@ async fn a_projection_that_advances_signals_once_with_the_committed_position() {
 
     drop(db);
     fixture.cleanup().await;
+}
+
+/// Polls until `condition` holds, or fails the test.
+///
+/// Waiting for a condition rather than a duration: a fixed sleep long enough to
+/// be reliable is also long enough to make the suite slow, and one short enough
+/// to be fast is flaky on a loaded machine — three of these tests were, on
+/// 2026-09-16. Same helper as `shutdown.rs`.
+async fn wait_until<F, Fut>(limit: Duration, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        if condition().await {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "condition did not hold within {limit:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

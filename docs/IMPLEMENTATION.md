@@ -417,7 +417,17 @@ drift with every change.
       (a claim found one due tenant of three). Both compare a stored `now()` with a
       later one, and both failed in the direction a backwards clock step produces;
       the machine is WSL2. Suspect the clock before the code, and pin `now()` in
-      the tests if it recurs
+      the tests if it recurs. **Four worker tests were a different kind of flake
+      and are fixed (2026-09-16):** `one_failing_job_does_not_stall_the_others`
+      failed the product owner's full run (1,444 s against 1,250 s the run before,
+      the compose `api`/`worker` containers live on the same Postgres), and running
+      the binary five times turned up `a_tenant_being_suspended_runs_only_its_drain_jobs…`
+      and `a_tenant_is_visited_by_one_visit_at_a_time` too; `shutdown.rs`'s
+      `a_failing_job_stalls_one_tenant…` had the same shape. All four ran the
+      worker for a fixed while — 200 to 600 ms — and asserted what had happened,
+      which a loaded machine misses. Each now waits for the condition it asserts
+      (`wait_until`, bounded at ten seconds, the helper `shutdown.rs` already had),
+      and both binaries passed five runs in a row
 
 ### Priority 6 · Later phases
 
