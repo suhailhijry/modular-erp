@@ -22,6 +22,20 @@ ignore = [
     # and `utoipa-axum` is what would have to move off it. Revisit on its next
     # release.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled in by utoipa-axum; nothing to move to yet" },
+    # **typst's tree** (2026-09-16, the PDF/A-3 invoice — §89). Every one of
+    # these sits under a part of typst this product never calls: `hayagriva`
+    # and `citationberg` are its bibliography, `syntect` and `two-face` its code
+    # highlighting, `yaml-rust` a config reader of theirs. `rustybuzz` and
+    # `ttf-parser` are the shaper and the font parser, which *are* used, and are
+    # "unmaintained" by the archived-repository rule with no successor to move
+    # to; both are pure Rust over bytes this product itself embeds. Each is
+    # removed when typst moves. Revisit at every typst release.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.38 pinned by citationberg under typst's bibliography, which nothing here calls; no upgrade in range" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.38 pinned by citationberg under typst's bibliography, which nothing here calls; no upgrade in range" },
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1 under syntect and two-face, typst's code highlighting, which nothing here calls; no fix exists" },
+    { id = "RUSTSEC-2024-0320", reason = "yaml-rust under syntect, typst's code highlighting, which nothing here calls" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz is typst's shaper; archived, no successor, pure Rust over fonts this product embeds itself" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is typst's font parser; archived, no successor, pure Rust over fonts this product embeds itself" },
 ]
 
 [licenses]

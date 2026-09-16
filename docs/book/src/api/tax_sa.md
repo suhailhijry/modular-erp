@@ -784,8 +784,9 @@ environment per process, and not one per call.
 | `GET` | `/v1/tax_sa/zatca/documents/{number}` |
 | `GET` | `/v1/tax_sa/zatca/documents/{number}/print` |
 | `GET` | `/v1/tax_sa/zatca/documents/{number}/xml` |
+| `GET` | `/v1/tax_sa/zatca/documents/{number}/pdf` |
 | `POST` | `/v1/tax_sa/zatca/documents/{number}/link` |
-| `GET` | `/v1/tax_sa/zatca/public/{token}` (open, bounded) |
+| `GET` | `/v1/tax_sa/zatca/public/{token}` (open, bounded; `?format=pdf`) |
 | `GET` `POST` | `/v1/tax_sa/zatca/onboarding` |
 | `PUT` | `/v1/tax_sa/zatca/onboarding/certificate` |
 | `POST` | `/v1/tax_sa/zatca/onboarding/activate` |
@@ -812,8 +813,22 @@ Decided 2026-09-16. **Print-ready HTML**, the QR inline as SVG and nothing
 fetched from anywhere, so a till prints it from the browser and a phone renders
 it from a link: an 80 mm receipt for a simplified invoice, an A4 page for a
 standard one and for a credit note, Arabic first and English beside it
-throughout. PDF/A-3 with the XML embedded — ZATCA's sharing format for a
-standard invoice — is the next step, not this one.
+throughout.
+
+**And PDF/A-3, the XML attached** (`pdf.rs`, decided the same day) — what a
+standard invoice is *shared* as under ZATCA's rules. typst as a library
+(`typst`, `typst-layout`, `typst-pdf`) lays out `print/invoice.typ` from a
+`document.json` this module writes — never markup built from strings, which a
+`#` in a description would turn into code — shapes the Arabic, subsets the two
+faces of IBM Plex Sans Arabic (OFL, in `fonts/`), and writes PDF/A-3b with the
+deliverable XML attached as `{number}.xml`, relationship `data`. The `World` it
+compiles in serves exactly four files and has no filesystem behind it; the
+PDF's date is the document's day on the business's clock, never the wall clock.
+Rendering runs off the request thread. `…/{number}/pdf`, and `?format=pdf` on
+the public link. The test reads the bytes back: the PDF/A identification, the
+output intent, the associated file byte for byte, every font descriptor with a
+font programme; veraPDF is not in CI, so `write_a_sample_pdf` (ignored) writes
+two samples to `target/` for a manual run.
 
 **`deliverable` is the one rule for whether a document may be handed over.** A
 simplified invoice's QR carries the stamp, so nothing before the signature. A

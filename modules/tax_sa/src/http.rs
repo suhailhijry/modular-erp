@@ -38,6 +38,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(zatca_document))
         .routes(routes!(print_document))
         .routes(routes!(document_xml))
+        .routes(routes!(document_pdf))
         .routes(routes!(document_link))
         .routes(routes!(public_print))
         .routes(routes!(onboarding_status, begin_onboarding))
@@ -1856,6 +1857,7 @@ async fn document_link(
     params(
         ("Host" = String, Header, description = "The business's subdomain — `bassat.erp.com`."),
         ("token" = String, Path, description = "From `POST /v1/tax_sa/zatca/documents/{number}/link`."),
+        ("format" = Option<String>, Query, description = "`pdf` for the PDF/A-3 with the XML attached; absent, the page."),
     ),
     security(),
     responses(
@@ -1870,7 +1872,9 @@ async fn public_print(
     caller: Public,
     Language(locale): Language,
     axum::extract::Path(token): axum::extract::Path<String>,
-) -> Result<axum::response::Html<String>, Problem> {
+    Query(query): Query<PublicQuery>,
+) -> Result<axum::response::Response, Problem> {
+    use axum::response::IntoResponse as _;
     require_module(&caller.db, &crate::module_id(), locale)?;
     let no_such_link = || {
         ApiError::NotFound(erp_i18n::Message::new(crate::messages::NO_SUCH_LINK))
@@ -1890,8 +1894,103 @@ async fn public_print(
     drop(conn);
     let number = secret.opens(&token).ok_or_else(no_such_link)?;
     let (document, deliverable) = handed_over(&caller.db, &number, PRINT_WAIT, locale).await?;
-    Ok(axum::response::Html(crate::print::html(
-        &document,
-        &deliverable.qr,
-    )))
+    if query.format.as_deref() == Some("pdf") {
+        let bytes = rendered_pdf(document, deliverable, locale).await?;
+        return Ok(pdf_response(&number, bytes));
+    }
+    Ok(axum::response::Html(crate::print::html(&document, &deliverable.qr)).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct PublicQuery {
+    /// `pdf` for the PDF/A-3; absent, the page.
+    format: Option<String>,
+}
+
+/// The PDF, rendered off the request thread: typst lays the page out and
+/// subsets the fonts, which is CPU for a few hundred milliseconds.
+async fn rendered_pdf(
+    document: crate::zatca::Document,
+    deliverable: crate::Deliverable,
+    locale: Locale,
+) -> Result<Vec<u8>, Problem> {
+    let number = document.number.clone();
+    let rendered = tokio::task::spawn_blocking(move || {
+        crate::pdf::pdf(&document, &deliverable.qr, &deliverable.xml)
+    })
+    .await;
+    match rendered {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(e)) => {
+            tracing::error!(document = %number, error = %e, "the PDF could not be rendered");
+            Err(ours(locale))
+        }
+        Err(e) => {
+            tracing::error!(document = %number, error = %e, "the PDF renderer did not finish");
+            Err(ours(locale))
+        }
+    }
+}
+
+/// A failure that is the build's, not the caller's.
+fn ours(locale: Locale) -> Problem {
+    Problem::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
+        locale,
+        &CATALOG,
+    )
+}
+
+fn pdf_response(number: &str, bytes: Vec<u8>) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/pdf".to_owned(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("inline; filename=\"{number}.pdf\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// The document as PDF/A-3, the XML attached.
+///
+/// What a standard invoice is *shared* as under ZATCA's rules: PDF/A-3b, the
+/// stamped UBL attached as `{number}.xml`, the fonts embedded, the QR drawn.
+/// A receipt gets one too. Waits and refuses exactly as the print does.
+#[utoipa::path(
+    get,
+    path = "/v1/tax_sa/zatca/documents/{number}/pdf",
+    tag = "tax_sa",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("number" = String, Path, description = "The statutory document number — `INV-00001`."),
+        ("wait" = Option<u64>, Query, description = "Seconds to wait for the signature or the clearance. Default and most 20; 0 answers at once."),
+    ),
+    responses(
+        (status = OK, description = "The document, as PDF/A-3 with the XML attached.", content_type = "application/pdf"),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No document with that number", body = Problem),
+        (status = CONFLICT, description = "Not to be handed over — see the print", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Not signed yet — `tax_sa.not_yet_signed`. Retry.", body = Problem),
+    ),
+)]
+async fn document_pdf(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    axum::extract::Path(number): axum::extract::Path<String>,
+    Query(query): Query<PrintQuery>,
+) -> Result<axum::response::Response, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let (document, deliverable) = handed_over(&tenant.db, &number, query.wait(), locale).await?;
+    let bytes = rendered_pdf(document, deliverable, locale).await?;
+    Ok(pdf_response(&number, bytes))
 }

@@ -1636,8 +1636,9 @@ supplier is refused, because recording a bill twice is a duplicate reclaim.
 | `GET /v1/tax_sa/zatca/documents/{number}` | One, with its UBL and its stamp | Read |
 | `GET /v1/tax_sa/zatca/documents/{number}/print` | The document as a page; waits for the signature or the clearance | Read |
 | `GET /v1/tax_sa/zatca/documents/{number}/xml` | The stamped or signed UBL, as a file | Read |
+| `GET /v1/tax_sa/zatca/documents/{number}/pdf` | PDF/A-3 with the XML attached | Read |
 | `POST /v1/tax_sa/zatca/documents/{number}/link` | A link a customer opens without signing in | Read |
-| `GET /v1/tax_sa/zatca/public/{token}` | That link. Open, bounded | — |
+| `GET /v1/tax_sa/zatca/public/{token}` | That link; `?format=pdf` for the PDF. Open, bounded | — |
 | `GET /v1/tax_sa/zatca/onboarding` | How far onboarding has got | Read |
 | `POST /v1/tax_sa/zatca/onboarding` | Generate the key pair and the CSR | ManageTenant |
 | `PUT /v1/tax_sa/zatca/onboarding/certificate` | Record a certificate ZATCA issued | ManageTenant |

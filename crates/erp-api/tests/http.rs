@@ -1997,6 +1997,14 @@ async fn a_print_waits_for_the_worker_and_a_link_opens_it() {
         .send(read("/v1/tax_sa/zatca/documents/INV-00001/xml?wait=0"))
         .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let (status, body, _) = fixture
+        .send(read("/v1/tax_sa/zatca/documents/INV-00001/pdf?wait=0"))
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        body["code"], "tax_sa.not_yet_signed",
+        "the PDF waits like the print"
+    );
     // A standard invoice is held until ZATCA clears it.
     let (status, body, _) = fixture
         .send(read("/v1/tax_sa/zatca/documents/INV-00002/print?wait=0"))
@@ -2028,7 +2036,26 @@ async fn a_print_waits_for_the_worker_and_a_link_opens_it() {
         .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["code"], "tax_sa.not_yet_signed", "the link found it");
-    let forged = format!("{}0", &path[..path.len() - 1]);
+    let (status, body, _) = fixture
+        .send(
+            Request::get(format!("{path}?format=pdf"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        body["code"], "tax_sa.not_yet_signed",
+        "the PDF link found it too"
+    );
+    // A byte off — and a different byte, so it is a forgery every run rather
+    // than fifteen in sixteen.
+    let last = path.chars().last().expect("a token");
+    let forged = format!(
+        "{}{}",
+        &path[..path.len() - 1],
+        if last == '0' { '1' } else { '0' }
+    );
     let (status, body, _) = fixture
         .send(Request::get(&forged).body(Body::empty()).unwrap())
         .await;
@@ -3503,6 +3530,7 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("zatca_document", ALL_ROLES),
     ("print_document", ALL_ROLES),
     ("document_xml", ALL_ROLES),
+    ("document_pdf", ALL_ROLES),
     ("document_link", ALL_ROLES),
     // Recording what happened. A clerk does this and nothing structural.
     ("post_entry", &["owner", "accountant", "clerk"]),
@@ -3933,7 +3961,7 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        283,
+        284,
         "expected two hundred and sixty-nine role-scoped operations"
     );
 

@@ -53,6 +53,7 @@ mod filing;
 pub mod http;
 pub mod messages;
 mod onboarded;
+pub mod pdf;
 pub mod print;
 mod projections;
 mod report;

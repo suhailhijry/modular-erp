@@ -26,10 +26,10 @@ on good grounds — the WPS file below being the sharpest case, where guessing a
 an unverifiable specification is the *worst* available option and two other
 documents said so while this one did not.
 
-**Where this stands:** 1,791 tests green as of 2026-09-16, clippy, fmt and `cargo deny` clean.
+**Where this stands:** 1,792 tests green as of 2026-09-16, clippy, fmt and `cargo deny` clean.
 **Priority 1 of [Road to selling](#road-to-selling) is complete** (§79–§83); in Priority 2 the
-statements item is done (§84–§87) and a customer can hold their invoice — the print, held B2B,
-public links (§88), PDF/A-3 still open. The per-phase test
+statements item (§84–§87) and the customer-holds item (§88 the print, held B2B and public
+links; §89 PDF/A-3 with the XML attached) are done. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end, and what blocks selling
@@ -179,6 +179,15 @@ drift with every change.
   stays in the worker. **Tokenised public links**: the number and an HMAC of it
   under a secret the business keeps, opened with no sign-in and bounded like
   every open route. `qrcode` is the one dependency added.
+- **PDF/A-3 through typst** (decided 2026-09-16). The standard invoice's sharing
+  format is PDF/A-3 with the XML embedded; `typst` and `typst-pdf` as a library
+  do the shaping, the bidi, the tables, the font subsetting and the PDF/A-3b
+  output with the attachment — a larger binary is worth not taking weeks over
+  it. The face is **IBM Plex Sans Arabic** (OFL, vendored), Arabic and Latin in
+  one family. `GET …/documents/{number}/pdf` for staff and `?format=pdf` on the
+  public link; both wait and refuse as the print does, and receipts get PDFs
+  from the same route. Conformance 3b; the attachment is the document the
+  `xml` route serves, as `{number}.xml`, relationship `data`.
 
 ### Waiting on the product owner
 
@@ -287,8 +296,8 @@ drift with every change.
       the server. Backend days; server rendering 1 week; PDF/A-3 1–2 weeks more.
       **Built 2026-09-16 (§88):** print-ready HTML on the server, the print and
       the XML waiting for the signature and, on a standard invoice, the clearance;
-      a customer's link behind an HMAC. **Still open:** PDF/A-3 with the XML
-      embedded, ZATCA's sharing format for a standard invoice
+      a customer's link behind an HMAC; **PDF/A-3 with the XML embedded the same
+      day (§89)**, through typst. Done
 - [ ] **Food & beverage and healthcare charts** (decided above), each installing into
       a fresh tenant and carrying every account the modules' conventional postings
       name. Days
@@ -427,7 +436,12 @@ drift with every change.
       worker for a fixed while — 200 to 600 ms — and asserted what had happened,
       which a loaded machine misses. Each now waits for the condition it asserts
       (`wait_until`, bounded at ten seconds, the helper `shutdown.rs` already had),
-      and both binaries passed five runs in a row
+      and both binaries passed five runs in a row. **A fifth, fixed the same day:**
+      `a_print_waits_for_the_worker_and_a_link_opens_it` and `print.rs`'s
+      `a_link_opens_its_document_and_nothing_else` forged a link by writing `0`
+      over the MAC's last hex digit — which one run in sixteen it already was, so
+      the "forgery" was the real link and opened (a 503 where a 404 was expected,
+      after the full twenty-second wait). Both now write a digit that differs
 
 ### Priority 6 · Later phases
 
@@ -1338,6 +1352,52 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
 
+### 89 · PDF/A-3, the XML attached
+
+**Built 2026-09-16**, closing the customer-holds item, from three decisions
+taken that day: typst over a hand-rolled writer (a larger binary is worth not
+taking weeks), IBM Plex Sans Arabic (OFL, vendored under `modules/tax_sa/fonts/`
+with its licence), a staff route and `?format=pdf` on the public link.
+
+**What exists now.** `tax_sa::pdf::pdf(&Document, qr, xml)` — a typst `World`
+serving exactly four files (`document.json` written from the stored document,
+`qr.svg`, the XML under its attachment name, `invoice.typ`) and two faces, no
+filesystem; `typst::compile` to a `PagedDocument`, `typst_pdf::pdf` with
+`PdfStandard::A_3b`, the PDF id set to the number and the date to the
+document's day on the business's clock. The template `print/invoice.typ` reads
+JSON rather than being built from strings, so a `#` in a description is text,
+not code; receipt or A4 by `d.receipt`, bilingual, the QR drawn from the same
+SVG the page uses, `pdf.attach(d.attachment, relationship: "data", mime-type:
+"application/xml")`. `GET …/documents/{number}/pdf` and the public link's
+`?format=pdf` render off the request thread (`spawn_blocking`) and wait and
+refuse exactly as the print does. The HTML print's formatting helpers are
+shared, so the two never disagree.
+
+**Proven by reading the bytes back** (`lopdf`, dev-only): PDF 1.7, XMP with
+`pdfaid:part` 3 and conformance `B`, an `OutputIntents` entry, the catalog's
+`AF`, exactly one `EmbeddedFile` whose decompressed bytes are ZATCA's stamped
+document byte for byte, every `FontDescriptor` carrying a font programme.
+veraPDF is not in CI: `write_a_sample_pdf` (ignored) writes a receipt, a
+cleared invoice and a credit note of each kind to `target/` for a manual run,
+and all four were handed over for one.
+
+**Guards, both falsified** (revert → `the_pdf_is_pdf_a_3_with_the_xml_attached`
+fails → restore): the standard set to plain PDF 1.7 instead of A-3b, and the
+XMP identification goes; `pdf.attach` taken out of the template, and the
+catalog has no associated file.
+
+**Six typst-transitive advisories, ignored with reasons in `deny.toml`:**
+`quick-xml` 0.38 twice (pinned by `citationberg` under `hayagriva`, typst's
+bibliography — never called here; no upgrade in range), `bincode` 1 and
+`yaml-rust` unmaintained (under `syntect` and `two-face`, typst's code
+highlighting — never called here), and `rustybuzz` and `ttf-parser`
+"unmaintained" by the archived-repository rule — typst's shaper and font
+parser, which *are* used, pure Rust over fonts this product embeds itself, with
+no successor to move to. All to be revisited at every typst release.
+
+**Not done here:** a "not ready yet" page for a customer's browser; nothing
+else on this item.
+
 ### 88 · What a customer holds: the print, and a link to it
 
 **Built 2026-09-16**, the second Priority 2 item, from six decisions taken that
@@ -1376,8 +1436,9 @@ real wait, the 409 on the standard invoice, the XML, the 404, and the link
 opened with no bearer and refused when forged.
 
 **Not done here:** PDF/A-3 with the XML embedded, which is what a standard
-invoice is *shared* as under ZATCA's rules; a "not ready yet" page for a
-customer's browser (the link answers problem+json meanwhile).
+invoice is *shared* as under ZATCA's rules (built the same day, §89); a "not
+ready yet" page for a customer's browser (the link answers problem+json
+meanwhile).
 
 ### 87 · A cost center is a dimension a line carries
 

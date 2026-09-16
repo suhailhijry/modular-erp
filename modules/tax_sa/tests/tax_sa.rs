@@ -626,6 +626,32 @@ impl Fixture {
         .expect("issues");
     }
 
+    /// ZATCA clears `number` and hands back its own document: ours, with
+    /// ZATCA's QR in place of the one we made. Returns that document.
+    async fn cleared_by_zatca(&self, number: &str) -> String {
+        let invoice = self.zatca(number).await;
+        let stamped = invoice
+            .signed_xml
+            .clone()
+            .expect("signed")
+            .replace(invoice.qr.as_deref().expect("our QR"), "WkFUQ0Etc3RhbXA=");
+        tax_sa::record_outcome(
+            &self.db,
+            number,
+            tax_sa::zatca::Kind::Standard,
+            &tax_sa::zatca::wire::Verdict::Accepted {
+                warnings: vec![],
+                stamped: Some(base64::engine::general_purpose::STANDARD.encode(&stamped)),
+            },
+            on("2026-02-12"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("records");
+        self.project().await;
+        stamped
+    }
+
     async fn zatca(&self, number: &str) -> tax_sa::Stored {
         let mut conn = self.db.acquire().await.expect("connection");
         let found = tax_sa::document(&mut conn, number)
@@ -2861,10 +2887,6 @@ async fn installing_the_module_declares_the_document_currency() {
 /// for the clearance and then prints ZATCA's stamped document with ZATCA's
 /// QR. The link is the same document behind a MAC.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one receipt and one invoice, through every state"
-)]
 async fn a_customer_holds_the_print_once_it_is_signed_and_a_standard_one_once_cleared() {
     let fixture = Fixture::new().await;
     let sealing = sealing();
@@ -2925,25 +2947,7 @@ async fn a_customer_holds_the_print_once_it_is_signed_and_a_standard_one_once_cl
         "signed is not cleared"
     );
     // ZATCA clears it and returns its own document, its own QR in it.
-    let stamped = invoice
-        .signed_xml
-        .clone()
-        .expect("signed")
-        .replace(invoice.qr.as_deref().expect("our QR"), "WkFUQ0Etc3RhbXA=");
-    tax_sa::record_outcome(
-        &fixture.db,
-        "INV-00001",
-        tax_sa::zatca::Kind::Standard,
-        &tax_sa::zatca::wire::Verdict::Accepted {
-            warnings: vec![],
-            stamped: Some(base64::engine::general_purpose::STANDARD.encode(&stamped)),
-        },
-        on("2026-02-12"),
-        &Metadata::default(),
-    )
-    .await
-    .expect("records");
-    fixture.project().await;
+    let stamped = fixture.cleared_by_zatca("INV-00001").await;
     let invoice = fixture.zatca("INV-00001").await;
     let handed = tax_sa::deliverable(&invoice).expect("cleared, so handed over");
     assert_eq!(handed.qr, "WkFUQ0Etc3RhbXA=", "ZATCA's QR, not ours");
@@ -2977,5 +2981,168 @@ async fn a_customer_holds_the_print_once_it_is_signed_and_a_standard_one_once_cl
     assert_eq!(secret.opens(&token).as_deref(), Some("INV-00002"));
     drop(conn);
 
+    fixture.cleanup().await;
+}
+
+/// **The PDF is PDF/A-3 with the XML attached**: the identification in its
+/// metadata, an output intent, the fonts embedded, and the attachment's bytes
+/// exactly the document the buyer's system needs — ZATCA's stamped one on a
+/// cleared standard invoice.
+#[tokio::test]
+async fn the_pdf_is_pdf_a_3_with_the_xml_attached() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    fixture.register().await;
+    fixture.go_live(&sealing).await;
+    fixture.sell("inv-1", "2026-02-10", riyals(1_000)).await;
+    fixture.project().await;
+    tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("signs");
+    fixture.project().await;
+    let stamped = fixture.cleared_by_zatca("INV-00001").await;
+
+    let invoice = fixture.zatca("INV-00001").await;
+    let handed = tax_sa::deliverable(&invoice).expect("cleared");
+    let document = invoice.document.clone().expect("what the print is made of");
+    let bytes = tax_sa::pdf::pdf(&document, &handed.qr, &handed.xml).expect("renders");
+    assert!(bytes.starts_with(b"%PDF-1.7"), "PDF/A-3 is PDF 1.7");
+
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a PDF lopdf can read");
+    let catalog = pdf.catalog().expect("a catalog");
+    assert!(
+        catalog.get(b"OutputIntents").is_ok(),
+        "PDF/A needs an output intent"
+    );
+    assert!(
+        catalog.get(b"AF").is_ok(),
+        "the attachment is an associated file"
+    );
+
+    let metadata = catalog
+        .get(b"Metadata")
+        .and_then(lopdf::Object::as_reference)
+        .and_then(|id| pdf.get_object(id))
+        .and_then(|o| o.as_stream())
+        .expect("XMP metadata")
+        .decompressed_content()
+        .expect("readable");
+    let xmp = String::from_utf8_lossy(&metadata);
+    assert!(
+        xmp.contains("pdfaid:part=\"3\"") || xmp.contains("<pdfaid:part>3</pdfaid:part>"),
+        "part 3: {xmp}"
+    );
+    assert!(
+        xmp.contains("pdfaid:conformance=\"B\"")
+            || xmp.contains("<pdfaid:conformance>B</pdfaid:conformance>"),
+        "conformance B: {xmp}"
+    );
+
+    let mut attached: Vec<Vec<u8>> = Vec::new();
+    let mut fonts_embedded = 0;
+    for object in pdf.objects.values() {
+        if let Ok(stream) = object.as_stream()
+            && stream
+                .dict
+                .get(b"Type")
+                .and_then(lopdf::Object::as_name)
+                .is_ok_and(|name| name == b"EmbeddedFile")
+        {
+            attached.push(stream.decompressed_content().expect("readable"));
+        }
+        // A font descriptor pointing at a font programme is an embedded font;
+        // a descriptor without one would be a font the reader has to have.
+        if let Ok(dict) = object.as_dict()
+            && dict
+                .get(b"Type")
+                .and_then(lopdf::Object::as_name)
+                .is_ok_and(|name| name == b"FontDescriptor")
+        {
+            assert!(
+                dict.has(b"FontFile") || dict.has(b"FontFile2") || dict.has(b"FontFile3"),
+                "a font descriptor with no font programme: {dict:?}"
+            );
+            fonts_embedded += 1;
+        }
+    }
+    assert_eq!(attached.len(), 1, "exactly the XML is attached");
+    assert_eq!(
+        String::from_utf8_lossy(&attached[0]),
+        stamped,
+        "the attachment is ZATCA's stamped document, byte for byte"
+    );
+    assert!(fonts_embedded >= 1, "the font is embedded, not referenced");
+
+    fixture.cleanup().await;
+}
+
+/// Writes four samples to `target/sample-*.pdf` — a receipt, a cleared
+/// invoice and a credit note of each kind — for a run through veraPDF, which
+/// is not in CI. `cargo test -p tax_sa --test tax_sa -- --ignored
+/// write_a_sample_pdf`.
+#[tokio::test]
+#[ignore = "writes a file for a manual validator run"]
+async fn write_a_sample_pdf() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    fixture.register().await;
+    fixture.go_live(&sealing).await;
+    fixture.sell("inv-1", "2026-02-10", riyals(1_000)).await;
+    fixture
+        .sell_to_a_consumer("inv-2", "2026-02-11", riyals(20))
+        .await;
+    fixture.project().await;
+    // A credit note of each kind: CN-00001 against the invoice, CN-00002
+    // against the receipt.
+    for (invoice, note, reason) in [
+        ("inv-1", "cn-1", "the wrong service"),
+        ("inv-2", "cn-2", "returned"),
+    ] {
+        sales::cancel_invoice(
+            &fixture.db,
+            &code(invoice),
+            note,
+            reason,
+            on("2026-02-11"),
+            &Metadata::default(),
+            sales::Authority::System,
+        )
+        .await
+        .expect("cancels");
+    }
+    fixture.project().await;
+    tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("signs");
+    fixture.project().await;
+    fixture.cleared_by_zatca("INV-00001").await;
+    fixture.cleared_by_zatca("CN-00001").await;
+    for (number, file) in [
+        ("INV-00002", "sample-receipt.pdf"),
+        ("INV-00001", "sample-invoice.pdf"),
+        ("CN-00002", "sample-receipt-credit-note.pdf"),
+        ("CN-00001", "sample-credit-note.pdf"),
+    ] {
+        let stored = fixture.zatca(number).await;
+        let handed = tax_sa::deliverable(&stored).expect("signed");
+        let document = stored.document.clone().expect("built");
+        let bytes = tax_sa::pdf::pdf(&document, &handed.qr, &handed.xml).expect("renders");
+        // The workspace's `target/`, not the crate's: tests run from the crate.
+        let path = format!("{}/../../target/{file}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::write(&path, bytes).expect("writes");
+        println!("wrote {path}");
+    }
     fixture.cleanup().await;
 }

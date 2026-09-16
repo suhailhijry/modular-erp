@@ -52910,6 +52910,139 @@
         ]
       }
     },
+    "/v1/tax_sa/zatca/documents/{number}/pdf": {
+      "get": {
+        "description": "What a standard invoice is *shared* as under ZATCA's rules: PDF/A-3b, the\nstamped UBL attached as `{number}.xml`, the fonts embedded, the QR drawn.\nA receipt gets one too. Waits and refuses exactly as the print does.",
+        "operationId": "document_pdf",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The statutory document number — `INV-00001`.",
+            "in": "path",
+            "name": "number",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Seconds to wait for the signature or the clearance. Default and most 20; 0 answers at once.",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/pdf": {}
+            },
+            "description": "The document, as PDF/A-3 with the XML attached."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No document with that number"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not to be handed over — see the print"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not signed yet — `tax_sa.not_yet_signed`. Retry. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "The document as PDF/A-3, the XML attached.",
+        "tags": [
+          "tax_sa"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
     "/v1/tax_sa/zatca/documents/{number}/print": {
       "get": {
         "description": "HTML with the QR inline as SVG and nothing fetched from anywhere: a till\nprints it from the browser, a phone renders it from a link. An 80 mm\nreceipt for a simplified invoice, an A4 page for a standard one and for a\ncredit note; Arabic first and English beside it throughout.\n\n**Waits for the worker.** A simplified invoice's QR carries the stamp, so\nnothing is served before the document is signed; a standard invoice is not\na valid invoice until ZATCA has cleared it, so nothing is served before\nthat — and what is served then is the document ZATCA stamped. Both happen\non the visit the sale asked for, usually within seconds, and this waits up\nto `wait` for them.",
@@ -53756,6 +53889,15 @@
             "in": "path",
             "name": "token",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`pdf` for the PDF/A-3 with the XML attached; absent, the page.",
+            "in": "query",
+            "name": "format",
+            "required": false,
             "schema": {
               "type": "string"
             }

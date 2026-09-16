@@ -419,7 +419,7 @@ fn totals(out: &mut String, document: &Document) {
 /// The QR as inline SVG, or nothing for a payload the encoder refuses — a
 /// print with no QR rather than no print, and the document view still carries
 /// the text.
-fn qr_svg(qr: &str) -> Option<String> {
+pub(crate) fn qr_svg(qr: &str) -> Option<String> {
     let code = qrcode::QrCode::new(qr.as_bytes()).ok()?;
     Some(
         code.render::<qrcode::render::svg::Color<'_>>()
@@ -429,7 +429,7 @@ fn qr_svg(qr: &str) -> Option<String> {
     )
 }
 
-fn title(document: &Document) -> (&'static str, &'static str) {
+pub(crate) fn title(document: &Document) -> (&'static str, &'static str) {
     match (document.type_code, document.kind) {
         (TypeCode::CreditNote, _) => ("إشعار دائن", "Credit note"),
         (TypeCode::DebitNote, _) => ("إشعار مدين", "Debit note"),
@@ -455,7 +455,7 @@ fn both(ar: &str, en: &str) -> String {
 }
 
 /// One line of address, the parts that are there.
-fn address(
+pub(crate) fn address(
     street: &str,
     building: Option<&str>,
     district: &str,
@@ -479,14 +479,14 @@ fn address(
 }
 
 /// The number without its currency: `115.00`, not `115.00 SAR`.
-fn amount(money: Money) -> String {
+pub(crate) fn amount(money: Money) -> String {
     let text = money.to_string();
     text.rsplit_once(' ')
         .map_or(text.clone(), |(number, _)| number.to_owned())
 }
 
 /// `1500` basis points as `15%`, `250` as `2.5%`.
-fn percent(rate_bp: i32) -> String {
+pub(crate) fn percent(rate_bp: i32) -> String {
     let (whole, hundredths) = (rate_bp / 100, rate_bp % 100);
     if hundredths == 0 {
         format!("{whole}%")
@@ -619,8 +619,11 @@ mod tests {
         let token = secret.token("INV-00001");
         assert!(token.starts_with("INV-00001."));
         assert_eq!(secret.opens(&token).as_deref(), Some("INV-00001"));
+        // A different byte, so it is a forgery every run rather than fifteen
+        // in sixteen.
+        let last = token.chars().last().expect("a token");
         let mut forged = token.clone();
-        forged.replace_range(token.len() - 1.., "0");
+        forged.replace_range(token.len() - 1.., if last == '0' { "1" } else { "0" });
         assert_eq!(secret.opens(&forged), None);
         assert_eq!(
             secret.opens("INV-00002.0000000000000000000000000000000000"),
