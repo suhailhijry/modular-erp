@@ -188,6 +188,92 @@ drift with every change.
   public link; both wait and refuse as the print does, and receipts get PDFs
   from the same route. Conformance 3b; the attachment is the document the
   `xml` route serves, as `{number}.xml`, relationship `data`.
+- **Products a till can use** (decided 2026-09-16, not yet built). A `Product`
+  aggregate **in `sales`**, at `/v1/sales/products` — in `sales` because
+  inventory is an optional module and a salon or clinic with no stock still
+  has a menu. **Price stored net of VAT** in the document currency, so the
+  till's `net` is the product's and VAT keeps being computed on the band
+  subtotal. **Names in both languages, the tenant's primary language required**
+  and the other optional; the line's description is the primary-language name.
+  A till or invoice line names the product's id and the product fills
+  description, net and VAT where the line leaves them out; **a `net` that
+  differs from the product's price needs a claim** (`sales:override_price`,
+  checked as `sales:approve_credit_note` is). **Barcode** on the product,
+  optional, unique among live products in the tenant; the till caches the
+  catalogue and matches barcodes itself, `?barcode=` on the list for everyone
+  else — serials stay inventory's, one per unit, resolved on the server.
+  **Editing** is one `PUT` with the full shape and one event, plus **retire**,
+  which hides the product from the till and keeps every line that named it.
+  **Optional inventory link** (`product`, validated to exist); a line naming
+  the product depletes stock through it. Writes for the roles that manage
+  sales settings, reads for anyone who can ring a sale.
+  **A tenant primary language** (decided the same day): the per-request locale
+  is the front-end user's; the tenant's language is for what the business
+  itself writes — product names first. It does not exist yet and is built
+  with the products. **Products map `prepaid` to the catalogue** (decided the
+  same day): a product may grant an entitlement when sold — a package of
+  uses, a subscription term — so the sale issues the tax invoice (VAT due
+  now), `prepaid` defers the value and recognises it use by use or ratably,
+  as its table already says; a package of seven sessions at 1,000 recognises
+  a seventh per session delivered, the discount being the transaction price
+  and not a line. Barcodes are per product, for physical products that have
+  one; serials stay per unit in inventory. **Settled the same day:**
+  `tenant.language` as a tenant setting, seeded Arabic, changeable only while
+  every live product has its name and description in the new language;
+  packages, subscriptions **and sold coupons** as products — a business sells
+  coupons to a reseller at a discount, a customer buys one for somebody else —
+  deposits and loyalty not; the grant in the sale's write and the revocation
+  in the cancellation's, through in-transaction variants `prepaid` gains as
+  `inventory` has; redemption at the till **explicit**, the cashier choosing
+  the entitlement, and **on booking completion** (`Stage::Completed`) in this
+  build; a validity in days or months on a prepaid product, the expiry from
+  the sale date; a subscription is a price and a term, no uses; **kits of
+  physical products in this build**. **And the same evening:** a description
+  is optional, and the language change is refused for a missing one exactly
+  as for a missing name; a **coupon is a bearer entitlement with a code**,
+  attached to a customer at first redemption, packages and subscriptions
+  named to the buyer; a coupon may be **tied to a branch, a product, a
+  service, or all**; **no open-value gift cards**; the **issuer's side only**
+  of a coupon resale — the tenant sells coupons for its own product to a
+  business customer at a discount; **redemptions never appear on a receipt**;
+  a **kit** lists components with quantities, one level deep, and its revenue
+  is **split across the components and kept per kit**, so the kit's sales and
+  each component's sales at the kit's discount are both readable; **booking
+  lines name a product**, not free text. **Closed the same evening:** three
+  coupon shapes on one basic model — a **sold coupon** (paid for, a bearer
+  entitlement in `prepaid`, always naming a product), a **promotional
+  discount** and a **promotional code** for influencers and paid advertising
+  (neither paid for, so no liability; a percentage or an amount off, scoped
+  to a branch, a product or all, applied at the till as a line allowance
+  without the price-override claim); **a service is a product** with no
+  inventory link; **every booking line names a product** and the bookable's
+  published rate *is* the product's price — nothing is deployed, so `what`
+  is replaced rather than kept beside; kit revenue allocated **in proportion
+  to standalone prices** (IFRS 15), the rounding remainder on the last
+  component. **And last:** a promotional code carries **optional numeric use
+  limits**, per customer and in total; a code **may carry no discount**, for
+  attribution alone; **stacking is the tenant's configuration, per kind of
+  discount or promotion** — loyalty-point redemption beside an ordinary
+  discount or not at all, several promotions or a maximum count (two, say),
+  unlimited, or unlimited up to a specified amount. That cap is **an amount
+  or a percentage**, the tenant's choice per rule, and there are two kinds of
+  cap: the tenant's **stacking cap is per sale**, across the basket; a
+  **promotion's own cap follows its scope** — per line when the promotion is
+  constrained to a product, per sale when it applies to all. Nothing on this
+  item is open; it is ready to build after the charts.
+- **Charts for launch, decided in detail** (2026-09-16): `food_beverage`
+  "Restaurants and cafés" and `healthcare` "Clinics and medical practices",
+  each the services baseline with vertical names on the conventional codes and
+  the additions listed in the products conversation of that day — food,
+  beverage and delivery-platform sales, tips payable, packaging, platform
+  commissions, spoilage, kitchen equipment with depreciation; consultations,
+  procedures, laboratory and imaging, pharmacy apart for its zero rating,
+  insurance claims receivable apart from patients, patient advances on `2400`,
+  medicines and supplies, outsourced laboratories, medical waste, licences,
+  claim rejections, malpractice insurance, medical equipment with
+  depreciation. Four guards in the property chart's style: tips are a
+  liability; platform sales and commissions are separate; insurance
+  receivable is apart from patients; medicines are apart from consultations.
 
 ### Waiting on the product owner
 
