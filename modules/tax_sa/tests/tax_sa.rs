@@ -2854,3 +2854,128 @@ async fn installing_the_module_declares_the_document_currency() {
 
     fixture.cleanup().await;
 }
+
+/// **A customer holds the print once it is signed, and a standard invoice
+/// once ZATCA clears it.** Before the signature nothing is handed over;
+/// after it the receipt carries the nine-tag QR; a standard invoice waits
+/// for the clearance and then prints ZATCA's stamped document with ZATCA's
+/// QR. The link is the same document behind a MAC.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one receipt and one invoice, through every state"
+)]
+async fn a_customer_holds_the_print_once_it_is_signed_and_a_standard_one_once_cleared() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    fixture.register().await;
+    fixture.go_live(&sealing).await;
+    fixture.sell("inv-1", "2026-02-10", riyals(1_000)).await;
+    fixture
+        .sell_to_a_consumer("inv-2", "2026-02-11", riyals(20))
+        .await;
+    fixture.project().await;
+
+    let receipt = fixture.zatca("INV-00002").await;
+    assert_eq!(receipt.kind, tax_sa::zatca::Kind::Simplified);
+    assert_eq!(
+        tax_sa::deliverable(&receipt),
+        Err(tax_sa::NotDeliverable::NotYetSigned),
+        "the QR has no stamp before the signature"
+    );
+    let invoice = fixture.zatca("INV-00001").await;
+    assert_eq!(
+        tax_sa::deliverable(&invoice),
+        Err(tax_sa::NotDeliverable::AwaitingClearance)
+    );
+
+    tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("signs");
+    fixture.project().await;
+
+    let receipt = fixture.zatca("INV-00002").await;
+    let handed = tax_sa::deliverable(&receipt).expect("signed, so handed over");
+    assert_eq!(
+        tax_sa::zatca::qr::decode(&handed.qr).expect("a QR").len(),
+        9,
+        "the stamp is in it"
+    );
+    assert_eq!(Some(handed.xml.as_str()), receipt.signed_xml.as_deref());
+    let document = receipt.document.clone().expect("what the print is made of");
+    let page = tax_sa::print::html(&document, &handed.qr);
+    assert!(page.contains("فاتورة ضريبية مبسطة"), "{page}");
+    assert!(page.contains("Simplified tax invoice"), "{page}");
+    assert!(page.contains("<svg"), "the QR is drawn: {page}");
+    assert!(page.contains("310122393500003"), "the seller's VAT number");
+    assert!(page.contains("قهوة"), "the line");
+    assert!(page.contains("23.00"), "20 plus 15% VAT, bare: {page}");
+    assert!(page.contains("class=\"receipt\""), "an 80 mm receipt");
+
+    let invoice = fixture.zatca("INV-00001").await;
+    assert_eq!(
+        tax_sa::deliverable(&invoice),
+        Err(tax_sa::NotDeliverable::AwaitingClearance),
+        "signed is not cleared"
+    );
+    // ZATCA clears it and returns its own document, its own QR in it.
+    let stamped = invoice
+        .signed_xml
+        .clone()
+        .expect("signed")
+        .replace(invoice.qr.as_deref().expect("our QR"), "WkFUQ0Etc3RhbXA=");
+    tax_sa::record_outcome(
+        &fixture.db,
+        "INV-00001",
+        tax_sa::zatca::Kind::Standard,
+        &tax_sa::zatca::wire::Verdict::Accepted {
+            warnings: vec![],
+            stamped: Some(base64::engine::general_purpose::STANDARD.encode(&stamped)),
+        },
+        on("2026-02-12"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("records");
+    fixture.project().await;
+    let invoice = fixture.zatca("INV-00001").await;
+    let handed = tax_sa::deliverable(&invoice).expect("cleared, so handed over");
+    assert_eq!(handed.qr, "WkFUQ0Etc3RhbXA=", "ZATCA's QR, not ours");
+    assert_eq!(
+        handed.xml, stamped,
+        "ZATCA's document, not the bytes we sent"
+    );
+    let document = invoice.document.clone().expect("what the print is made of");
+    let page = tax_sa::print::html(&document, &handed.qr);
+    assert!(
+        page.contains("فاتورة ضريبية<") || page.contains("فاتورة ضريبية</span>"),
+        "{page}"
+    );
+    assert!(page.contains("Tax invoice"), "{page}");
+    assert!(page.contains("class=\"invoice\""), "an A4 page");
+    assert!(
+        page.contains("Customer VAT no."),
+        "a standard invoice names the buyer: {page}"
+    );
+
+    // The link: made once, and the same document behind it.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let secret = tax_sa::LinkSecret::resolve_or_create(&mut conn)
+        .await
+        .expect("made");
+    let again = tax_sa::LinkSecret::resolve_or_create(&mut conn)
+        .await
+        .expect("read back");
+    assert_eq!(secret, again);
+    let token = secret.token("INV-00002");
+    assert_eq!(secret.opens(&token).as_deref(), Some("INV-00002"));
+    drop(conn);
+
+    fixture.cleanup().await;
+}

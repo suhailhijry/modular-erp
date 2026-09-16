@@ -70,6 +70,10 @@ uuid = { version = "1.24", features = ["serde", "v5", "v7"] }
 sha2 = "0.11"
 base64 = "0.22"
 hex = "0.4"
+# The QR on a printed invoice, as SVG. Reed–Solomon and masking are exactly the
+# kind of thing that is subtly wrong when written by hand; `svg` only, no image
+# stack.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # The Unicode bidi character classes, so a message can tell whether an argument
 # runs the other way from the sentence around it. Already in the lock through
 # `idna`; naming it adds nothing to the build.

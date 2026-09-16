@@ -24,7 +24,7 @@ use utoipa_axum::routes;
 use erp_web::ApiError;
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{Allowed, Language, ManageAccounts, ManageTenant, Read};
+use erp_web::{Allowed, Language, ManageAccounts, ManageTenant, Public, Read};
 use erp_web::{Consistency, nudge};
 use erp_web::{Json, Query, bad_request, metadata, require_module};
 
@@ -36,6 +36,10 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(zatca_standing))
         .routes(routes!(zatca_documents))
         .routes(routes!(zatca_document))
+        .routes(routes!(print_document))
+        .routes(routes!(document_xml))
+        .routes(routes!(document_link))
+        .routes(routes!(public_print))
         .routes(routes!(onboarding_status, begin_onboarding))
         .routes(routes!(accept_certificate))
         .routes(routes!(activate))
@@ -584,6 +588,9 @@ struct DocumentView {
     remarks: Vec<RemarkView>,
     #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
     settled_at: Option<Timestamp>,
+    /// Whether it may be handed to the customer now: signed, and on a
+    /// standard invoice cleared. `GET …/{number}/print` renders it.
+    deliverable: bool,
 }
 
 /// One document, with the bytes.
@@ -602,6 +609,7 @@ struct FullDocumentView {
 }
 
 fn document_view(stored: crate::Stored) -> DocumentView {
+    let deliverable = crate::deliverable(&stored).is_ok();
     DocumentView {
         number: stored.number,
         source: stored.source,
@@ -628,6 +636,7 @@ fn document_view(stored: crate::Stored) -> DocumentView {
                 message: r.message,
             })
             .collect(),
+        deliverable,
         settled_at: stored.settled_at,
     }
 }
@@ -1591,4 +1600,298 @@ async fn refuse_if_live(
         ));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// What the customer holds
+// ---------------------------------------------------------------------------
+
+/// How long a print waits for the worker: long enough for the visit the sale
+/// asked for — projection, signature, submission — and short enough to answer
+/// before a proxy gives up on the request.
+const PRINT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+#[derive(Debug, Deserialize)]
+struct PrintQuery {
+    /// Seconds to wait for the signature or the clearance before answering.
+    /// The default is the most, 20; `0` answers at once.
+    wait: Option<u64>,
+}
+
+impl PrintQuery {
+    fn wait(&self) -> std::time::Duration {
+        let seconds = self
+            .wait
+            .unwrap_or(PRINT_WAIT.as_secs())
+            .min(PRINT_WAIT.as_secs());
+        std::time::Duration::from_secs(seconds)
+    }
+}
+
+/// A link a customer opens without signing in.
+#[derive(Debug, Serialize, ToSchema)]
+struct LinkView {
+    /// Relative to the tenant's host: `/v1/tax_sa/zatca/public/INV-00001.<mac>`.
+    link: String,
+}
+
+/// **The document, once it may be handed over** — waiting for the worker up
+/// to `wait`. Nothing is served before the signature, and a standard invoice
+/// nothing before the clearance; see [`crate::deliverable`].
+async fn handed_over(
+    db: &erp_tenant::TenantDb,
+    number: &str,
+    wait: std::time::Duration,
+    locale: Locale,
+) -> Result<(crate::zatca::Document, crate::Deliverable), Problem> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let mut conn = db
+            .read()
+            .await
+            .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+        let found = crate::document(&mut conn, number)
+            .await
+            .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+        drop(conn);
+        let Some(stored) = found else {
+            return Err(no_such_document(number, locale));
+        };
+        match crate::deliverable(&stored) {
+            Ok(deliverable) => {
+                let document = stored.document.ok_or_else(|| {
+                    undeliverable(crate::NotDeliverable::Unregistered, number, locale)
+                })?;
+                return Ok((document, deliverable));
+            }
+            Err(crate::NotDeliverable::NotYetSigned | crate::NotDeliverable::AwaitingClearance)
+                if tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(why) => return Err(undeliverable(why, number, locale)),
+        }
+    }
+}
+
+fn no_such_document(number: &str, locale: Locale) -> Problem {
+    ApiError::NotFound(
+        erp_i18n::Message::new(crate::messages::NO_SUCH_DOCUMENT)
+            .with("document", erp_i18n::MessageArg::text(number.to_owned())),
+    )
+    .into_problem(locale, &CATALOG)
+}
+
+/// Why a document is not handed over, as the caller sees it.
+fn undeliverable(why: crate::NotDeliverable, number: &str, locale: Locale) -> Problem {
+    use crate::NotDeliverable;
+    let (status, code) = match why {
+        // Retryable: the worker is on its way.
+        NotDeliverable::NotYetSigned => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            crate::messages::NOT_YET_SIGNED,
+        ),
+        NotDeliverable::AwaitingClearance => {
+            (StatusCode::CONFLICT, crate::messages::AWAITING_CLEARANCE)
+        }
+        NotDeliverable::Refused => (StatusCode::CONFLICT, crate::messages::DOCUMENT_REFUSED),
+        NotDeliverable::Unregistered => (StatusCode::CONFLICT, crate::messages::NOT_DELIVERABLE),
+    };
+    Problem::new(
+        status,
+        &erp_i18n::Message::new(code)
+            .with("document", erp_i18n::MessageArg::text(number.to_owned())),
+        locale,
+        &CATALOG,
+    )
+}
+
+/// The document, print-ready.
+///
+/// HTML with the QR inline as SVG and nothing fetched from anywhere: a till
+/// prints it from the browser, a phone renders it from a link. An 80 mm
+/// receipt for a simplified invoice, an A4 page for a standard one and for a
+/// credit note; Arabic first and English beside it throughout.
+///
+/// **Waits for the worker.** A simplified invoice's QR carries the stamp, so
+/// nothing is served before the document is signed; a standard invoice is not
+/// a valid invoice until ZATCA has cleared it, so nothing is served before
+/// that — and what is served then is the document ZATCA stamped. Both happen
+/// on the visit the sale asked for, usually within seconds, and this waits up
+/// to `wait` for them.
+#[utoipa::path(
+    get,
+    path = "/v1/tax_sa/zatca/documents/{number}/print",
+    tag = "tax_sa",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("number" = String, Path, description = "The statutory document number — `INV-00001`."),
+        ("wait" = Option<u64>, Query, description = "Seconds to wait for the signature or the clearance. Default and most 20; 0 answers at once."),
+    ),
+    responses(
+        (status = OK, description = "The document, as a page.", content_type = "text/html"),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No document with that number", body = Problem),
+        (status = CONFLICT, description = "Not to be handed over: a standard invoice ZATCA has not cleared — `tax_sa.awaiting_clearance`; one it refused — `tax_sa.document_refused`; one issued before registration — `tax_sa.not_deliverable`", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Not signed yet — `tax_sa.not_yet_signed`. Retry.", body = Problem),
+    ),
+)]
+async fn print_document(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    axum::extract::Path(number): axum::extract::Path<String>,
+    Query(query): Query<PrintQuery>,
+) -> Result<axum::response::Html<String>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let (document, deliverable) = handed_over(&tenant.db, &number, query.wait(), locale).await?;
+    Ok(axum::response::Html(crate::print::html(
+        &document,
+        &deliverable.qr,
+    )))
+}
+
+/// The document for a buyer's system: the one ZATCA stamped on a cleared
+/// standard invoice, the signed one on a simplified invoice. Waits and refuses
+/// exactly as the print does.
+#[utoipa::path(
+    get,
+    path = "/v1/tax_sa/zatca/documents/{number}/xml",
+    tag = "tax_sa",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("number" = String, Path, description = "The statutory document number — `INV-00001`."),
+        ("wait" = Option<u64>, Query, description = "Seconds to wait for the signature or the clearance. Default and most 20; 0 answers at once."),
+    ),
+    responses(
+        (status = OK, description = "The UBL document, as a file.", content_type = "application/xml"),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No document with that number", body = Problem),
+        (status = CONFLICT, description = "Not to be handed over — see the print", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Not signed yet — `tax_sa.not_yet_signed`. Retry.", body = Problem),
+    ),
+)]
+async fn document_xml(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    axum::extract::Path(number): axum::extract::Path<String>,
+    Query(query): Query<PrintQuery>,
+) -> Result<axum::response::Response, Problem> {
+    use axum::response::IntoResponse as _;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let (_, deliverable) = handed_over(&tenant.db, &number, query.wait(), locale).await?;
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/xml; charset=utf-8".to_owned(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{number}.xml\""),
+            ),
+        ],
+        deliverable.xml,
+    )
+        .into_response())
+}
+
+/// A link the customer opens without signing in.
+///
+/// The document's number and an HMAC of it under a secret this business keeps
+/// (made on the first link asked for), so it cannot be guessed from the number
+/// and needs nothing stored per document. It opens the same print, under the
+/// same waiting and the same refusals. Relative to the business's own host.
+#[utoipa::path(
+    post,
+    path = "/v1/tax_sa/zatca/documents/{number}/link",
+    tag = "tax_sa",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("number" = String, Path, description = "The statutory document number — `INV-00001`."),
+    ),
+    responses(
+        (status = OK, body = LinkView),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No document with that number", body = Problem),
+    ),
+)]
+async fn document_link(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    axum::extract::Path(number): axum::extract::Path<String>,
+) -> Result<Json<LinkView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    if crate::document(&mut conn, &number)
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?
+        .is_none()
+    {
+        return Err(no_such_document(&number, locale));
+    }
+    let secret = crate::LinkSecret::resolve_or_create(&mut conn)
+        .await
+        .map_err(|e| erp_web::config_problem(&e, locale, &CATALOG))?;
+    Ok(Json(LinkView {
+        link: format!("/v1/tax_sa/zatca/public/{}", secret.token(&number)),
+    }))
+}
+
+/// The print, for whoever holds the link.
+///
+/// No sign-in: the link is the credential. Bounded per caller and per business
+/// like every public route, and it waits and refuses exactly as the staff
+/// print does.
+#[utoipa::path(
+    get,
+    path = "/v1/tax_sa/zatca/public/{token}",
+    tag = "tax_sa",
+    params(
+        ("Host" = String, Header, description = "The business's subdomain — `bassat.erp.com`."),
+        ("token" = String, Path, description = "From `POST /v1/tax_sa/zatca/documents/{number}/link`."),
+    ),
+    security(),
+    responses(
+        (status = OK, description = "The document, as a page.", content_type = "text/html"),
+        (status = NOT_FOUND, description = "A link that opens nothing here — `tax_sa.no_such_link`", body = Problem),
+        (status = CONFLICT, description = "Not to be handed over — see the print", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Not signed yet — `tax_sa.not_yet_signed`. Retry.", body = Problem),
+        (status = TOO_MANY_REQUESTS, body = Problem),
+    ),
+)]
+async fn public_print(
+    caller: Public,
+    Language(locale): Language,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Result<axum::response::Html<String>, Problem> {
+    require_module(&caller.db, &crate::module_id(), locale)?;
+    let no_such_link = || {
+        ApiError::NotFound(erp_i18n::Message::new(crate::messages::NO_SUCH_LINK))
+            .into_problem(locale, &CATALOG)
+    };
+    let mut conn = caller
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let secret =
+        erp_eventlog::configuration::get::<crate::LinkSecret>(&mut conn, crate::LinkSecret::KEY)
+            .await
+            .map_err(|e| erp_web::config_problem(&e, locale, &CATALOG))?
+            .map(|configured| configured.value)
+            .ok_or_else(no_such_link)?;
+    drop(conn);
+    let number = secret.opens(&token).ok_or_else(no_such_link)?;
+    let (document, deliverable) = handed_over(&caller.db, &number, PRINT_WAIT, locale).await?;
+    Ok(axum::response::Html(crate::print::html(
+        &document,
+        &deliverable.qr,
+    )))
 }

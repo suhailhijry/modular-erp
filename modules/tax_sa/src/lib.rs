@@ -53,6 +53,7 @@ mod filing;
 pub mod http;
 pub mod messages;
 mod onboarded;
+pub mod print;
 mod projections;
 mod report;
 mod submit;
@@ -67,6 +68,7 @@ pub use documents::{
 };
 pub use filing::{Filing, FilingEvent};
 pub use onboarded::{Onboarding, OnboardingEvent, Refusal, Step, onboarding_id};
+pub use print::{Deliverable, LinkSecret, NotDeliverable, deliverable};
 pub use projections::{
     FiledReturn, FiledReturns, Onboarded, Onboardings, Outcomes, TaxSa, filed, onboarding,
     projections,

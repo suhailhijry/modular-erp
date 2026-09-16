@@ -9,6 +9,17 @@ pub const INVALID_REGISTRATION: MessageCode = MessageCode::new("tax_sa.invalid_r
 pub const INVALID_DOCUMENT: MessageCode = MessageCode::new("tax_sa.invalid_document");
 pub const NOT_REGISTERED: MessageCode = MessageCode::new("tax_sa.not_registered");
 pub const NO_SUCH_DOCUMENT: MessageCode = MessageCode::new("tax_sa.no_such_document");
+/// A print asked for before the document is signed. 503; the worker signs on
+/// the visit the sale asked for, so try again.
+pub const NOT_YET_SIGNED: MessageCode = MessageCode::new("tax_sa.not_yet_signed");
+/// A standard invoice asked for before ZATCA cleared it. 409.
+pub const AWAITING_CLEARANCE: MessageCode = MessageCode::new("tax_sa.awaiting_clearance");
+/// ZATCA refused this document; nothing to hand over. 409.
+pub const DOCUMENT_REFUSED: MessageCode = MessageCode::new("tax_sa.document_refused");
+/// Issued before the business registered; no chain, no QR. 409.
+pub const NOT_DELIVERABLE: MessageCode = MessageCode::new("tax_sa.not_deliverable");
+/// A public link that opens nothing. 404.
+pub const NO_SUCH_LINK: MessageCode = MessageCode::new("tax_sa.no_such_link");
 pub const NO_INDUSTRY: MessageCode = MessageCode::new("tax_sa.no_industry");
 pub const ALREADY_LIVE: MessageCode = MessageCode::new("tax_sa.already_live");
 
@@ -20,6 +31,11 @@ pub static CODES: &[MessageCode] = &[
     INVALID_DOCUMENT,
     NOT_REGISTERED,
     NO_SUCH_DOCUMENT,
+    NOT_YET_SIGNED,
+    AWAITING_CLEARANCE,
+    DOCUMENT_REFUSED,
+    NOT_DELIVERABLE,
+    NO_SUCH_LINK,
     NO_INDUSTRY,
     ALREADY_LIVE,
 ];
@@ -134,5 +150,79 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Template::Simple(
             "هذه المنشأة مفعّلة لدى هيئة الزكاة والضريبة والجمارك في بيئة {environment} بالفعل. إعادة التسجيل تستبدل المفتاح المرتبط بشهادتها؛ جدِّد الشهادة أو استبدلها عبر مسار التسجيل اليدوي.",
         ),
+    ),
+    (
+        NOT_YET_SIGNED,
+        Locale::English,
+        Template::Simple(
+            "{document} is not signed yet, so its QR cannot carry the stamp. It is signed on the \
+             next visit, usually within seconds; try again.",
+        ),
+    ),
+    (
+        NOT_YET_SIGNED,
+        Locale::Arabic,
+        Template::Simple(
+            "لم يُوقَّع المستند {document} بعد، فلا يحمل رمز الاستجابة السريعة الختم. يُوقَّع في \
+             الزيارة التالية خلال ثوانٍ عادةً؛ حاول مجددًا.",
+        ),
+    ),
+    (
+        AWAITING_CLEARANCE,
+        Locale::English,
+        Template::Simple(
+            "{document} is a standard tax invoice and ZATCA has not cleared it yet. It must not be \
+             given to the buyer until it is; try again shortly.",
+        ),
+    ),
+    (
+        AWAITING_CLEARANCE,
+        Locale::Arabic,
+        Template::Simple(
+            "{document} فاتورة ضريبية ولم تعتمدها هيئة الزكاة والضريبة والجمارك بعد. لا يجوز \
+             تسليمها للعميل قبل الاعتماد؛ حاول بعد قليل.",
+        ),
+    ),
+    (
+        DOCUMENT_REFUSED,
+        Locale::English,
+        Template::Simple(
+            "ZATCA refused {document}, so there is nothing to hand over. Correct the source and \
+             issue a new document.",
+        ),
+    ),
+    (
+        DOCUMENT_REFUSED,
+        Locale::Arabic,
+        Template::Simple(
+            "رفضت هيئة الزكاة والضريبة والجمارك المستند {document}، فلا شيء يُسلَّم. صحّح المصدر \
+             وأصدر مستندًا جديدًا.",
+        ),
+    ),
+    (
+        NOT_DELIVERABLE,
+        Locale::English,
+        Template::Simple(
+            "{document} was issued before the business registered with ZATCA. It has no place \
+             in the chain and no QR, and cannot be printed as a tax document.",
+        ),
+    ),
+    (
+        NOT_DELIVERABLE,
+        Locale::Arabic,
+        Template::Simple(
+            "صدر المستند {document} قبل تسجيل المنشأة لدى الهيئة. لا موضع له في السلسلة ولا رمز \
+             استجابة سريعة، فلا يُطبع مستندًا ضريبيًا.",
+        ),
+    ),
+    (
+        NO_SUCH_LINK,
+        Locale::English,
+        Template::Simple("This link opens nothing here."),
+    ),
+    (
+        NO_SUCH_LINK,
+        Locale::Arabic,
+        Template::Simple("هذا الرابط لا يفتح شيئًا هنا."),
     ),
 ];

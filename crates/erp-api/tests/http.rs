@@ -1918,6 +1918,126 @@ async fn cost_centers_cut_the_profit_and_loss() {
     fixture.cleanup().await;
 }
 
+/// **A print waits for the worker, and a link opens it without signing in.**
+/// Nothing is served before the signature (503, retry), a standard invoice
+/// nothing before the clearance (409); the wait is real; a forged link opens
+/// nothing; the document view says whether it may be handed over.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every refusal a print has, and the link"
+)]
+async fn a_print_waits_for_the_worker_and_a_link_opens_it() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+    fixture.register_with_zatca(&token).await;
+
+    let invoice = |key: &str, customer: serde_json::Value| {
+        Request::post("/v1/sales/invoices")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", idem(key))
+            .body(Body::from(
+                serde_json::json!({
+                    "customer": customer,
+                    "issued_on": "2026-03-01T00:00:00Z",
+                    "currency": "SAR",
+                    "lines": [{ "description": "قهوة", "net": 2_000, "vat": "standard" }]
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let read = |path: &str| {
+        Request::get(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (status, body, _) = fixture
+        .send(invoice("b2c", serde_json::json!({ "name": "زبون" })))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body, _) = fixture
+        .send(invoice(
+            "b2b",
+            serde_json::json!({ "name": "روابي", "vat_number": "300000000000003" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    fixture.project_tax(tenant).await;
+
+    // Unsigned: not handed over, and the wait is real.
+    let (status, view, _) = fixture
+        .send(read("/v1/tax_sa/zatca/documents/INV-00001"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["deliverable"], false);
+    let (status, body, _) = fixture
+        .send(read("/v1/tax_sa/zatca/documents/INV-00001/print?wait=0"))
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "tax_sa.not_yet_signed");
+    let started = std::time::Instant::now();
+    let (status, body, _) = fixture
+        .send(read("/v1/tax_sa/zatca/documents/INV-00001/print?wait=1"))
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "it waited for the worker: {:?}",
+        started.elapsed()
+    );
+    let (status, body, _) = fixture
+        .send(read("/v1/tax_sa/zatca/documents/INV-00001/xml?wait=0"))
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    // A standard invoice is held until ZATCA clears it.
+    let (status, body, _) = fixture
+        .send(read("/v1/tax_sa/zatca/documents/INV-00002/print?wait=0"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "tax_sa.awaiting_clearance");
+    let (status, body, _) = fixture
+        .send(read("/v1/tax_sa/zatca/documents/INV-09999/print?wait=0"))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    // The link: opened with no sign-in, the same document behind it.
+    let (status, link, _) = fixture
+        .send(
+            Request::post("/v1/tax_sa/zatca/documents/INV-00001/link")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{link}");
+    let path = link["link"].as_str().expect("a path");
+    assert!(
+        path.starts_with("/v1/tax_sa/zatca/public/INV-00001."),
+        "{path}"
+    );
+    let (status, body, _) = fixture
+        .send(Request::get(path).body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "tax_sa.not_yet_signed", "the link found it");
+    let forged = format!("{}0", &path[..path.len() - 1]);
+    let (status, body, _) = fixture
+        .send(Request::get(&forged).body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "tax_sa.no_such_link");
+
+    fixture.cleanup().await;
+}
+
 /// An unbalanced entry is a 400 that says by how much — in the caller's
 /// language.
 #[tokio::test]
@@ -3381,6 +3501,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("zatca_standing", ALL_ROLES),
     ("zatca_documents", ALL_ROLES),
     ("zatca_document", ALL_ROLES),
+    ("print_document", ALL_ROLES),
+    ("document_xml", ALL_ROLES),
+    ("document_link", ALL_ROLES),
     // Recording what happened. A clerk does this and nothing structural.
     ("post_entry", &["owner", "accountant", "clerk"]),
     ("reverse_entry", &["owner", "accountant", "clerk"]),
@@ -3810,7 +3933,7 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        280,
+        283,
         "expected two hundred and sixty-nine role-scoped operations"
     );
 

@@ -297,6 +297,11 @@ fn only_the_deliberately_public_routes_are_public() {
         // and guessing fail differently.
         ("post", "/v1/codes"),
         ("post", "/v1/sessions/code"),
+        // **A customer's link to their invoice.** The link *is* the
+        // credential — the number and an HMAC of it under the business's
+        // secret — and `erp_web::Public` bounds it per caller and per
+        // business like every other open route. See `tax_sa::print`.
+        ("get", "/v1/tax_sa/zatca/public/{token}"),
     ];
 
     for (path, method, operation) in operations(&document()) {

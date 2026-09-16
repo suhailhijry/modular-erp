@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", source_id as \"source_id!\", kind as \"kind!\",\n                  type_code as \"type_code!\", issued_at as \"issued_at!\",\n                  currency as \"currency!\", net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  icv, previous_hash, invoice_hash, xml, qr, status as \"status!\",\n                  signature, signed_xml, signed_at, stamped_xml, remarks, settled_at\n             FROM proj_tax_sa.zatca_document WHERE id = $1",
+  "query": "SELECT id as \"id!\", source_id as \"source_id!\", kind as \"kind!\",\n                  type_code as \"type_code!\", issued_at as \"issued_at!\",\n                  currency as \"currency!\", net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  icv, previous_hash, invoice_hash, xml, qr, status as \"status!\",\n                  signature, signed_xml, signed_at, stamped_xml, remarks, settled_at,\n                  document\n             FROM proj_tax_sa.zatca_document WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -233,6 +233,17 @@
             "name": "settled_at"
           }
         }
+      },
+      {
+        "ordinal": 21,
+        "name": "document",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "document"
+          }
+        }
       }
     ],
     "parameters": {
@@ -261,8 +272,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "1b2596c04c6bf1e4800a5974357c4d07aaf40801bddca66567409039ee5e1f86"
+  "hash": "f19f02339a8713e35a9153f7606113f7b8bd04416f9e2a1f5e7da5f190470a10"
 }

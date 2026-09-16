@@ -782,9 +782,61 @@ environment per process, and not one per call.
 | `GET` | `/v1/tax_sa/zatca` |
 | `GET` | `/v1/tax_sa/zatca/documents` |
 | `GET` | `/v1/tax_sa/zatca/documents/{number}` |
+| `GET` | `/v1/tax_sa/zatca/documents/{number}/print` |
+| `GET` | `/v1/tax_sa/zatca/documents/{number}/xml` |
+| `POST` | `/v1/tax_sa/zatca/documents/{number}/link` |
+| `GET` | `/v1/tax_sa/zatca/public/{token}` (open, bounded) |
 | `GET` `POST` | `/v1/tax_sa/zatca/onboarding` |
 | `PUT` | `/v1/tax_sa/zatca/onboarding/certificate` |
 | `POST` | `/v1/tax_sa/zatca/onboarding/activate` |
+
+## What the customer holds
+
+```rust
+pub enum NotDeliverable { Unregistered, NotYetSigned, AwaitingClearance, Refused }
+pub struct Deliverable { pub qr: String, pub xml: String }
+pub fn deliverable(stored: &Stored) -> Result<Deliverable, NotDeliverable>;   // the rule
+
+pub fn print::html(document: &Document, qr: &str) -> String;
+pub fn print::qr_in(xml: &str) -> Option<String>;
+
+pub struct LinkSecret { pub secret: String }        // `tax_sa.link_secret`, made on first use
+impl LinkSecret {
+    pub async fn resolve_or_create(conn) -> Result<Self, ConfigError>;
+    pub fn token(&self, number: &str) -> String;     // INV-00001.<32 hex of HMAC-SHA256>
+    pub fn opens(&self, token: &str) -> Option<String>;
+}
+```
+
+Decided 2026-09-16. **Print-ready HTML**, the QR inline as SVG and nothing
+fetched from anywhere, so a till prints it from the browser and a phone renders
+it from a link: an 80 mm receipt for a simplified invoice, an A4 page for a
+standard one and for a credit note, Arabic first and English beside it
+throughout. PDF/A-3 with the XML embedded — ZATCA's sharing format for a
+standard invoice — is the next step, not this one.
+
+**`deliverable` is the one rule for whether a document may be handed over.** A
+simplified invoice's QR carries the stamp, so nothing before the signature. A
+standard invoice is not a valid invoice until ZATCA has cleared it, so nothing
+before the clearance — and what is handed over then is the document ZATCA
+stamped and returned, its QR read back out of it (`qr_in`), not the bytes we
+sent. Refused documents and ones issued before registration are never handed
+over. The document view carries `deliverable` so a screen can say so.
+
+**The routes wait.** The worker signs and submits on the visit the sale asked
+for, usually within seconds, and `…/print` and `…/xml` wait up to twenty
+seconds (`?wait=`, `0` answers at once) before answering 503
+`tax_sa.not_yet_signed` (retry) or 409 `tax_sa.awaiting_clearance`. The private
+key never leaves the worker.
+
+**The link is the credential.** A customer is not a member, so
+`POST …/{number}/link` hands staff a path — the number and an HMAC of it under a
+secret the business keeps, made on the first link asked for — and
+`GET /v1/tax_sa/zatca/public/{token}` opens the same print under the same waiting
+and refusals, with no sign-in, bounded per caller and per business by
+`erp_web::Public` like every open route. The document's own UUID would not do:
+it is a v5 of the VAT number and the number, both printed on the invoice.
+Verified in constant time; a byte off opens nothing (404 `tax_sa.no_such_link`).
 
 ## What is proven and what is not
 

@@ -676,6 +676,9 @@ pub struct Stored {
     /// Warnings on an accepted document, errors on a refused one.
     pub remarks: Vec<crate::zatca::wire::Remark>,
     pub settled_at: Option<Timestamp>,
+    /// Everything the renderer worked from — what a print is made of. `None`
+    /// on a document that was never built.
+    pub document: Option<crate::zatca::Document>,
 }
 
 /// Where a document stands with ZATCA.
@@ -914,7 +917,8 @@ pub async fn document(
                   type_code as "type_code!", issued_at as "issued_at!",
                   currency as "currency!", net as "net!", tax as "tax!", gross as "gross!",
                   icv, previous_hash, invoice_hash, xml, qr, status as "status!",
-                  signature, signed_xml, signed_at, stamped_xml, remarks, settled_at
+                  signature, signed_xml, signed_at, stamped_xml, remarks, settled_at,
+                  document
              FROM proj_tax_sa.zatca_document WHERE id = $1"#,
         number,
     )
@@ -958,6 +962,11 @@ pub async fn document(
                 .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
                 .unwrap_or_default(),
             settled_at: row.settled_at,
+            document: row
+                .document
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
         })
     })
     .transpose()

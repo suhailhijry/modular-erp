@@ -26,10 +26,10 @@ on good grounds — the WPS file below being the sharpest case, where guessing a
 an unverifiable specification is the *worst* available option and two other
 documents said so while this one did not.
 
-**Where this stands:** 1,786 tests green as of 2026-09-15, clippy, fmt and `cargo deny` clean.
-**Priority 1 of [Road to selling](#road-to-selling) is complete** (§79–§83), and Priority 2's
-statements item is done: the fiscal calendar, the period close, FX deferred behind a
-riyals-only rule for tax documents, and cost centers (§84–§87). The per-phase test
+**Where this stands:** 1,791 tests green as of 2026-09-16, clippy, fmt and `cargo deny` clean.
+**Priority 1 of [Road to selling](#road-to-selling) is complete** (§79–§83); in Priority 2 the
+statements item is done (§84–§87) and a customer can hold their invoice — the print, held B2B,
+public links (§88), PDF/A-3 still open. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end, and what blocks selling
@@ -169,6 +169,16 @@ drift with every change.
   a confined member's reads stay pinned to `posting.branch`. Reassigning a
   posted line is a reversal and a repost; `reports` does not get the dimension
   yet.
+- **What a customer holds** (decided 2026-09-16). Print-ready **HTML** on the
+  server — the QR inline as SVG, nothing fetched, an 80 mm receipt for a
+  simplified invoice and an A4 page for a standard one and a credit note —
+  **bilingual always**, Arabic first. PDF/A-3 with the XML embedded is the next
+  step. The worker keeps signing and submitting on the nudged visit and **the
+  print route waits** for the signature and, on a standard invoice, for ZATCA's
+  clearance, then renders the stamped document ZATCA returned; the private key
+  stays in the worker. **Tokenised public links**: the number and an HMAC of it
+  under a secret the business keeps, opened with no sign-in and bounded like
+  every open route. `qrcode` is the one dependency added.
 
 ### Waiting on the product owner
 
@@ -274,7 +284,11 @@ drift with every change.
       no QR, and the full nine-field QR exists only after the worker signs; a B2B
       invoice is not held back until ZATCA clears it, and handing one over uncleared
       is a breach. Rendering (QR image, Arabic, PDF) can live in the interface or
-      the server. Backend days; server rendering 1 week; PDF/A-3 1–2 weeks more
+      the server. Backend days; server rendering 1 week; PDF/A-3 1–2 weeks more.
+      **Built 2026-09-16 (§88):** print-ready HTML on the server, the print and
+      the XML waiting for the signature and, on a standard invoice, the clearance;
+      a customer's link behind an HMAC. **Still open:** PDF/A-3 with the XML
+      embedded, ZATCA's sharing format for a standard invoice
 - [ ] **Food & beverage and healthcare charts** (decided above), each installing into
       a fresh tenant and carrying every account the modules' conventional postings
       name. Days
@@ -1313,6 +1327,47 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       `sales/commands.rs:46` (from both credit paths, as they stood then; §70
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
+
+### 88 · What a customer holds: the print, and a link to it
+
+**Built 2026-09-16**, the second Priority 2 item, from six decisions taken that
+morning and recorded above.
+
+**What exists now.** `tax_sa::print` — `deliverable(&Stored)` is the one rule
+for whether a document may be handed over (a simplified invoice once signed, a
+standard one once ZATCA cleared it and then ZATCA's stamped document with
+ZATCA's QR read back out of it; refused and pre-registration documents never);
+`html(&Document, qr)` renders the page, an 80 mm receipt or an A4 invoice,
+Arabic first and English beside it, the QR inline as SVG through `qrcode`;
+`LinkSecret` under `tax_sa.link_secret`, made on first use with OpenSSL's
+random bytes, whose `token` is `INV-00001.<32 hex of HMAC-SHA256>` and whose
+`opens` verifies in constant time. `Stored` gained the document JSON the
+renderer works from (`.sqlx` regenerated).
+
+**Routes.** `GET /v1/tax_sa/zatca/documents/{number}/print` (`text/html`) and
+`…/xml` (`application/xml`, as a file) wait up to twenty seconds (`?wait=`)
+for the worker's visit — the one the sale nudged — before 503
+`tax_sa.not_yet_signed` (retry) or 409 `tax_sa.awaiting_clearance` /
+`tax_sa.document_refused` / `tax_sa.not_deliverable`. `POST …/{number}/link`
+hands staff the customer's path; `GET /v1/tax_sa/zatca/public/{token}` opens
+it with no sign-in under `erp_web::Public` (bounded per caller and per
+business, declared deliberate in `only_the_deliberately_public_routes_are_public`)
+and 404 `tax_sa.no_such_link` for a byte off. The document view carries
+`deliverable`.
+
+**Guards, all falsified** (revert → the named test fails → restore): a receipt
+handed over unsigned; a standard invoice handed over uncleared; a link opening
+without its MAC; the print no longer waiting. Tests: the rule state by state,
+the link, and the helpers (unit); the whole path in the module test — refused
+before the signature, the nine-tag QR after it, the receipt's title, line and
+bare amount, the standard invoice held until a recorded clearance and then
+printing ZATCA's QR and document, the secret made once; over HTTP the 503, the
+real wait, the 409 on the standard invoice, the XML, the 404, and the link
+opened with no bearer and refused when forged.
+
+**Not done here:** PDF/A-3 with the XML embedded, which is what a standard
+invoice is *shared* as under ZATCA's rules; a "not ready yet" page for a
+customer's browser (the link answers problem+json meanwhile).
 
 ### 87 · A cost center is a dimension a line carries
 

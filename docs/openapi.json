@@ -2658,6 +2658,10 @@
           "currency": {
             "type": "string"
           },
+          "deliverable": {
+            "description": "Whether it may be handed to the customer now: signed, and on a\nstandard invoice cleared. `GET …/{number}/print` renders it.",
+            "type": "boolean"
+          },
           "gross": {
             "format": "int64",
             "type": "integer"
@@ -2762,7 +2766,8 @@
           "net",
           "tax",
           "gross",
-          "remarks"
+          "remarks",
+          "deliverable"
         ],
         "type": "object"
       },
@@ -4331,6 +4336,19 @@
         },
         "required": [
           "identity"
+        ],
+        "type": "object"
+      },
+      "LinkView": {
+        "description": "A link a customer opens without signing in.",
+        "properties": {
+          "link": {
+            "description": "Relative to the tenant's host: `/v1/tax_sa/zatca/public/INV-00001.<mac>`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "link"
         ],
         "type": "object"
       },
@@ -8549,6 +8567,10 @@
                 "currency": {
                   "type": "string"
                 },
+                "deliverable": {
+                  "description": "Whether it may be handed to the customer now: signed, and on a\nstandard invoice cleared. `GET …/{number}/print` renders it.",
+                  "type": "boolean"
+                },
                 "gross": {
                   "format": "int64",
                   "type": "integer"
@@ -8653,7 +8675,8 @@
                 "net",
                 "tax",
                 "gross",
-                "remarks"
+                "remarks",
+                "deliverable"
               ],
               "type": "object"
             },
@@ -52771,6 +52794,387 @@
         }
       ]
     },
+    "/v1/tax_sa/zatca/documents/{number}/link": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The document's number and an HMAC of it under a secret this business keeps\n(made on the first link asked for), so it cannot be guessed from the number\nand needs nothing stored per document. It opens the same print, under the\nsame waiting and the same refusals. Relative to the business's own host.",
+        "operationId": "document_link",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The statutory document number — `INV-00001`.",
+            "in": "path",
+            "name": "number",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No document with that number"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now: `code` is `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "A link the customer opens without signing in.",
+        "tags": [
+          "tax_sa"
+        ]
+      }
+    },
+    "/v1/tax_sa/zatca/documents/{number}/print": {
+      "get": {
+        "description": "HTML with the QR inline as SVG and nothing fetched from anywhere: a till\nprints it from the browser, a phone renders it from a link. An 80 mm\nreceipt for a simplified invoice, an A4 page for a standard one and for a\ncredit note; Arabic first and English beside it throughout.\n\n**Waits for the worker.** A simplified invoice's QR carries the stamp, so\nnothing is served before the document is signed; a standard invoice is not\na valid invoice until ZATCA has cleared it, so nothing is served before\nthat — and what is served then is the document ZATCA stamped. Both happen\non the visit the sale asked for, usually within seconds, and this waits up\nto `wait` for them.",
+        "operationId": "print_document",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The statutory document number — `INV-00001`.",
+            "in": "path",
+            "name": "number",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Seconds to wait for the signature or the clearance. Default and most 20; 0 answers at once.",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {}
+            },
+            "description": "The document, as a page."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No document with that number"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not to be handed over: a standard invoice ZATCA has not cleared — `tax_sa.awaiting_clearance`; one it refused — `tax_sa.document_refused`; one issued before registration — `tax_sa.not_deliverable`"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not signed yet — `tax_sa.not_yet_signed`. Retry. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "The document, print-ready.",
+        "tags": [
+          "tax_sa"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/tax_sa/zatca/documents/{number}/xml": {
+      "get": {
+        "operationId": "document_xml",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The statutory document number — `INV-00001`.",
+            "in": "path",
+            "name": "number",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Seconds to wait for the signature or the clearance. Default and most 20; 0 answers at once.",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/xml": {}
+            },
+            "description": "The UBL document, as a file."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No document with that number"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not to be handed over — see the print"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not signed yet — `tax_sa.not_yet_signed`. Retry. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "The document for a buyer's system: the one ZATCA stamped on a cleared\nstandard invoice, the signed one on a simplified invoice. Waits and refuses\nexactly as the print does.",
+        "tags": [
+          "tax_sa"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
     "/v1/tax_sa/zatca/onboarding": {
       "get": {
         "description": "`state` is the short answer — `none`, `checking`, `refused` or `live`;\n`checks` and `refusal` say what the worker has done since the certificate.\nAnswered without unsealing anything: whether a secret exists is a different\nquestion from what it is, and this endpoint may only ask the first.",
@@ -53332,6 +53736,119 @@
           "tax_sa"
         ]
       }
+    },
+    "/v1/tax_sa/zatca/public/{token}": {
+      "get": {
+        "description": "No sign-in: the link is the credential. Bounded per caller and per business\nlike every public route, and it waits and refuses exactly as the staff\nprint does.",
+        "operationId": "public_print",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `POST /v1/tax_sa/zatca/documents/{number}/link`.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {}
+            },
+            "description": "The document, as a page."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A link that opens nothing here — `tax_sa.no_such_link`"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not to be handed over — see the print"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "See `code`."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not signed yet — `tax_sa.not_yet_signed`. Retry. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "security": [],
+        "summary": "The print, for whoever holds the link.",
+        "tags": [
+          "tax_sa"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/tenant": {
       "get": {
