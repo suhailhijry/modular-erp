@@ -278,6 +278,89 @@ drift with every change.
   carries a **revenue account**, and stocked ones an **inventory** and a **cost
   account**, all defaulting to the conventional codes — without it the vertical
   charts' revenue split has nothing posting to it.
+- **Classifications instead of cost centers** (decided 2026-09-18, not yet
+  built; researched in §90). DualEntry's model: tenant-defined **types**, each
+  a list of **values that nest** — one tree per type, reports rolling up —
+  tagged on **lines**, so the chart stays small. §87's cost center becomes one
+  type and is reworked, nothing being deployed; the branch stays its own
+  column because confinement reads it. **Tags ride the revenue, expense and
+  cost lines**; receivable, payable, VAT and cash lines carry none and the
+  balance sheet stays company-wide. **A tag arrives in this order:** what the
+  line says, a rule over the operation's facts, the default on what the line
+  names, nothing. **Re-tagging history is an event** that changes tags and
+  never amounts, in open periods only. **Rule and default changes apply
+  forward only.** **Custom fields and allocation templates are in this item.**
+  Learned suggestions are not: they come later through TypeSafe's AI model,
+  Jev, and are that integration's problem. **Settled the same day:**
+  **default tags** live on products, customers, suppliers, employees, tills,
+  promotional codes and accounts; a tag may be **required per kind of
+  operation and per account**. **Custom fields** on invoices, credit notes,
+  supplier bills, customers, suppliers, products, employees and bookings —
+  text, number, date, yes/no, a pick list of the tenant's own values, and
+  **file uploads** (through `files`); no formulas; a field may be required,
+  appears in the record's API and lists, can be filtered on, is never summed
+  in a financial report, and may be marked **printed** — on the page only,
+  ZATCA's signed XML having no place for it. **Allocation templates** on
+  supplier bill lines, manual journal lines **and sales lines**, splitting by
+  **percentages, fixed amounts, or a mix**; applying one replaces the line with
+  several tagged lines on the document itself — visible, editable before
+  posting, frozen after. **A mixed template takes its fixed amounts first**
+  and divides what remains by percentages that total 100; fixed amounts past
+  the line refuse it. **Both this and approvals stay in Priority 5.**
+- **Approval workflows** (decided 2026-09-18, not yet built; §90). Rules are
+  authored per kind of operation — comparisons on amounts and percentages —
+  and **every rule that matches is triggered and must be satisfied**. A rule
+  names a **chain of supervisors**: ordered steps, each a list of **named
+  users** — roles were considered and removed — satisfied by *any* or by
+  *all*, with **"no self-approval" as an option on the rule**. **Held means the operation is stored** as the
+  request and replayed on approval; nothing exists until then. Researched the
+  same day: Business Central, NetSuite and Zoho Books all keep a *visible
+  document* in a pending status that cannot post, and tills (Lightspeed,
+  Square, Toast) take a manager's PIN on the spot — so the stored request is
+  shown to its approver as a **preview by dry run**, the way `preview_chart`
+  runs the real install and rolls it back, and listed to its requester as
+  pending. **The owner is never held and may always approve.** **First kinds
+  of operation:** discounts and price overrides, invoices, credit notes,
+  refunds, supplier bills, supplier payments, manual journal entries, stock
+  write-offs and count adjustments, payroll runs, period close and reopen —
+  and **sensitive permission changes**. **Each rule says whether it applies to
+  API keys, on by default.** Managing the rules is a **new permission** held
+  by the owner and manager roles and grantable; **editing approval rules can
+  never itself be put behind a rule**. **Staleness:** the replay recomputes the
+  facts; a failure is the requester's to hear; a fact the matching rule names
+  that grew past what was approved is held again; an unanswered request lapses
+  after the tenant's number of days, fourteen by default. **At the till the
+  supervisor approves from their own phone** — told by push, which `messaging`
+  already sends through FCM — because a supervisor walking to a till in a
+  crowded supermarket is the thing to avoid; **a PIN on the cashier's device
+  is the fallback** for a phone that is off or has no connection. **Approval
+  comes before payment:** what is held at the till is the discount's
+  authorisation for that basket, and the sale carries it once the customer
+  pays. **The till parks a basket** so the cashier serves the next customer
+  while one waits. **System jobs are never held.** **A rejection by
+  anyone on any chain ends the whole request, every rejection carries a
+  reason, and the requester may withdraw at any time.** **Sensitive kinds:**
+  granting or changing a role, granting a claim, issuing an API key, changing
+  the second-factor policy, editing permission limits, changing posting
+  accounts, **exporting client data, exporting financial data, and granting
+  any permission that exports sensitive data**. **Escalation:** a named person
+  who neither approves nor rejects is passed over to **their immediate
+  manager** on the org chart, and the escalation is logged for reports; the
+  **rule's author sets the interval, with no default**; it **keeps climbing**,
+  manager after manager; with **nobody above, it goes to the owner**. **Chains
+  of several matching rules start together**, and **one person's approval of a
+  request counts everywhere they appear on it**. **A rule cannot be saved
+  without its escalation interval.** **The PIN is six digits** — proposed with
+  it and not objected to: set by the supervisor, good only for approving at a
+  till and never for signing in, locked after five wrong attempts until they
+  sign in and reset it, and the approval marked as given by PIN at that till.
+  **A third answer beside approve and reject: "needs modification".** The
+  request goes back to its requester with the supervisor's note instead of
+  ending; they edit and send it again, and **the new version is shown with
+  its changes highlighted** against the one before — the request's fields and
+  the dry-run preview both. **A resubmission restarts every chain from its
+  first step**: an approval was of a version that no longer exists. Nothing on
+  approvals is open.
 
 ### Waiting on the product owner
 
@@ -489,6 +572,21 @@ drift with every change.
       quotations and sales orders, debit notes, and recurring invoices in `sales`
 - [ ] Offline till; card-terminal integration
 - [ ] Restaurants: tables, kitchen orders, modifiers, recipes. 6–10 weeks
+- [ ] **Approval workflows** (researched 2026-09-18, §90; decisions open). A
+      tenant writes rules naming the operations that need approval and who gives
+      it; a matching operation is held, its approvers are told, and it runs when
+      they say yes. A gate inside the command, where `hr::may` is called today,
+      not the generic document state machine declined on 2026-09-14. 3–4 weeks
+      after the shared fact vocabulary (1 week)
+- [ ] **Automatic accounting classifications** (researched 2026-09-18, §90;
+      decisions open). **Classifications instead of cost centers**, as the
+      dimensional-accounting systems have them: tenant-defined types, each a
+      list of values, tagged on every line that reaches the journal — by
+      defaults from what the line names and by rules over the operation's
+      facts — frozen on the event, so the chart stays small and the P&L, the
+      journal and the sales reports cut by any of them. §87's cost center
+      becomes one type. **With custom fields and allocation templates** (decided
+      2026-09-18). ~5–6 weeks after the same fact vocabulary
 - [ ] Security polish: rate limits and lockout for signed-in users; API key expiry;
       session idle timeout and a list of active sessions; virus scanning of uploads;
       keys scoped `*:manage_tenant` must not rewrite permission limits; the remaining
@@ -1441,6 +1539,167 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       `sales/commands.rs:46` (from both credit paths, as they stood then; §70
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
+
+### 90 · Researched, not built: operations held for approval, and classifications set by rules
+
+**Asked for 2026-09-18.** Two features, one finding: both are rules over the
+facts of an operation, and the rules crate already has the machinery —
+`DynCondition`, `Facts`, a validated `FactRegistry`, `Rules<E>` with first
+match and `explain`, authoring templates. What neither has is the *vocabulary*:
+the registry that exists (`erp_tenant::limits::registry`) knows four facts —
+`amount`, `branch`, `capability`, `role` — and the amount reaches it only on
+the ledger's hand-posted entries, which Priority 5 already lists as a gap. So
+the first piece of work is shared: **the facts of an operation, computed inside
+the command where the total exists** — operation, module, amount, currency,
+branch, requester, requester's role and claims; then product, category,
+customer, payment method, discount. One vocabulary, three consumers: the
+permission limits (refuse), approvals (hold), classifications (tag). This is
+the rules phase's deferred half with two real consumers behind it, which is
+what §5b said it was waiting for.
+
+#### Approvals — what exists
+
+Approval today is a **gate, not a workflow**. Five claims
+(`sales:approve_credit_note`, `sales:exceed_document_limit`,
+`purchases:approve_payment`, `hr:approve_timesheet`,
+`hr:reset_second_factor`) are checked by `hr::may` at command time: the person
+*doing* the thing must hold the claim, or it is refused. Only payroll runs and
+timesheets have two steps, and those are compiled into their aggregates.
+Nothing can say *"hold this and ask somebody"*. The owner exemption, the
+self-approval rule and the house rule — *switching a control on must not be the
+act that strands you* — are all decided and carry over.
+
+**Reconciling with 2026-09-14.** The generic `StateMachine` driving document
+workflows and approval routing was declined: documents stay compiled types.
+This proposal keeps that. No document gains a generic state; the *operation*
+is what waits.
+
+#### Approvals — the proposed shape
+
+**The gate gains a third answer.** Where a command calls `hr::may` today it
+calls a gate with the operation's facts and gets *proceed*, *refuse* or *hold*.
+The tenant's approval rules are `Rules<Approvers>` — the `Rule<ApprovalChain>`
+the rules crate's own doc anticipated. On *hold* the command writes nothing of
+its own: an `Approval` aggregate records the request **as the request** — route,
+body, the caller, the facts as they stood — under the write's own
+`Idempotency-Key`, and the route answers 202 with the approval's id. Approvers
+hear by bell and email. On approval the API replays the stored request with
+the same key; the command runs again, the gate finds the approval and proceeds,
+and the event's metadata carries who approved. **Nothing exists until then** —
+no draft, no number taken, nothing posted — so there is no gap in a ZATCA
+series and no half-document in a list.
+
+**Staleness is handled by running again, not by trusting the snapshot.** The
+replay computes fresh facts. If the operation now fails — the stock went, the
+period closed — the requester is told why. If the facts exceed what was
+approved — the amount grew — it is held again. Pending requests expire.
+
+#### Classifications — what exists
+
+The cost center (§87): one dimension, per line, optional, defaulting to the
+entry's branch, carried by manual entries and purchase bill lines only, cut on
+the P&L and the journal; reassigning is a reversal and a repost; `reports`
+does not have it. Custom fields, which the 2026-09-14 note mentions, do not
+exist in code.
+
+#### Classifications — the proposed shape
+
+**Tenant-defined dimensions beside the cost center** — channel, department,
+project, doctor, campaign — each a list of values opened and closed like cost
+centers. A line on a document carries its values, the posting lines a module
+derives from it inherit them, and they are frozen on the event (L5). **Rules
+set them:** per dimension, `Rules<Value>` over the same facts, first match; a
+value sent on the line wins; `explain` says which rule tagged it. It is the
+rule the accounting-rules conversation of 2026-09-16 ended on — *the engine
+decides the label, code decides the entry* — and per-product accounts are its
+first instance. Rule changes apply forward.
+
+#### What the product owner added, 2026-09-18
+
+**Approvals are authored, per kind of operation.** Somebody with the
+permission opens *Approval workflows*, picks a kind of operation — discounts,
+invoices — and adds a rule: *if the total discount is X% of the invoice,
+require authorisation by supervisor X*; *if the invoice total is 50,000 SAR or
+more, require approval by supervisor X*. Comparisons on amounts and
+percentages; a **list of supervisors satisfied by any or by all**; and **"no
+self-approval" as an option on the rule**. One engine, used by every section
+of the system.
+
+What that settles: rules are grouped by operation kind, so **each kind of
+operation declares the facts it supplies** — its own small registry, which is
+also what the authoring page reads to offer fields. The crate needs no new
+operator: it has `eq ne lt lte gt gte`, `all/any/not`, and `Int`, `Text`,
+`Bool`, `Money`; a percentage is an `Int` in basis points, as VAT rates are.
+The consequence is `Approvers { who: Vec<user>, mode: any | all, own: bool }`.
+One addition is needed: an operation can match **more than one** rule — a
+discount rule and a total rule on the same invoice — and the crate's
+`evaluate` is first match.
+
+**Classifications are tags on whatever produces a journal entry.** The branch's
+cost center is attached today; beside it go tags such as the point of sale,
+the department, the specialist, the campaign — added automatically, by the
+tenant's configuration. So a tag takes its value one of two ways: **bound** to
+something the operation already knows (the till that rang it, the specialist
+on the booking line, the campaign behind the promotional code, the product's
+category), or **decided by a condition** over the operation's facts, producing
+a value from the tenant's own list.
+
+**Staleness, confirmed by the product owner the same day:** the replay
+recomputes the facts as of the approval; a failure is the requester's to hear;
+a fact *the matching rule names* that has grown past what was approved is held
+again, and one the rule never mentioned is not; an unanswered request lapses
+after the tenant's number of days, fourteen by default.
+
+#### Classifications, researched against DualEntry (2026-09-18)
+
+The product owner meant DualEntry's classifications — **instead of** cost
+centers, not beside them. Their documentation's own words: *"Classifications
+(also called dimensions) are tags you attach to individual transaction
+lines"*; each **type** (Department) *"holds a list of values"* (Engineering,
+Sales); they give *"granular reporting without inflating your chart of
+accounts"* — one expense account, each line tagged with its department;
+*"you can require a classification on certain transaction types so users
+cannot post a line without tagging it"*; reports *"group by classification …
+show either as a details column, and filter on them"*. A classification tags
+**a line**, where their custom field describes a whole record. Their product
+pages add **unlimited nesting** of values (against a single-level class or a
+five-dimension ceiling elsewhere), allocation templates by percentage or
+amount, and categorisation that suggests tags on bank-feed, scanned and
+imported lines. It is the dimensional model of Sage Intacct, NetSuite's
+segments and Business Central's dimensions, and the last of those documents
+the part DualEntry's pages leave out — **how a tag arrives without anybody
+typing it**: default dimensions on master records (customer, vendor, item,
+account, employee), a priority order when two defaults disagree, and
+per-account rules that a value is mandatory, fixed, or forbidden.
+
+**What it means here.** There is no cost-center concept in that model: a cost
+center is one classification type. Nothing is deployed, so §87 is reworked
+rather than kept beside — the `CostCenter` aggregate becomes types and values,
+`Line.cost_center` becomes the line's tags, `?cost_center=` and the
+by-cost-center P&L become any type's. **The branch stays its own column**:
+confinement reads it, and access control is not a reporting dimension. A
+"Branch" type bound to it gives the same cut. **A tag arrives**, in order: what
+the line says; a rule over the operation's facts; the default on what the line
+names — the product, the customer, the specialist, the till, the promotional
+code's campaign; nothing. Frozen on the event, explained on request.
+**Decided the same day:** nesting, tags on revenue, expense and cost lines
+only, that order of arrival, re-tagging by an event in open periods, forward-only
+rules; **custom fields and allocation templates join this item**, and learned
+suggestions wait for TypeSafe's Jev.
+
+#### Open decisions, put to the product owner the same day
+
+Approvals: the gate-and-replay shape itself; nothing existing until approved;
+the first approvable operations; who approves (named users, claim holders in
+the branch, the requester's manager); steps and whether any one approver
+satisfies a step; owner never held and always able to approve, nobody
+approving their own; expiry; API keys held and system jobs never; approval at
+the till over the real-time stream. Classifications: nesting of values; which
+posting lines carry tags; the order in which a tag arrives; required per kind
+of operation and per account; which records carry defaults; re-tagging history
+by an event that never touches amounts, or by reversal as §87 does;
+forward-only rules. And where both sit in the road map — filed under Priority
+5 until told otherwise.
 
 ### 89 · PDF/A-3, the XML attached
 
