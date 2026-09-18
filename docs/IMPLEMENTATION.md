@@ -273,7 +273,11 @@ drift with every change.
   claim rejections, malpractice insurance, medical equipment with
   depreciation. Four guards in the property chart's style: tips are a
   liability; platform sales and commissions are separate; insurance
-  receivable is apart from patients; medicines are apart from consultations.
+   receivable is apart from patients; medicines are apart from consultations.
+- **Per-product accounts** (decided 2026-09-16, not yet built). Every product
+  carries a **revenue account**, and stocked ones an **inventory** and a **cost
+  account**, all defaulting to the conventional codes — without it the vertical
+  charts' revenue split has nothing posting to it.
 
 ### Waiting on the product owner
 
