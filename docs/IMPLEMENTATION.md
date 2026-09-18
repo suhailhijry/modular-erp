@@ -1885,6 +1885,13 @@ printing ZATCA's QR and document, the secret made once; over HTTP the 503, the
 real wait, the 409 on the standard invoice, the XML, the 404, and the link
 opened with no bearer and refused when forged.
 
+**Added 2026-09-18, the product owner's call:** the public link takes `?wait=`
+as the staff routes do, through the same `PrintQuery` so the twenty-second
+ceiling lives in one place. It had waited the full twenty seconds whatever was
+asked, which cost the HTTP test forty seconds and gave a customer's browser no
+way to ask for an answer at once. Falsified: the fixed wait put back, `wait=0`
+on the link takes 20.16 s and the test fails.
+
 **Not done here:** PDF/A-3 with the XML embedded, which is what a standard
 invoice is *shared* as under ZATCA's rules (built the same day, §89); a "not
 ready yet" page for a customer's browser (the link answers problem+json

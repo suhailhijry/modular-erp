@@ -2031,14 +2031,39 @@ async fn a_print_waits_for_the_worker_and_a_link_opens_it() {
         path.starts_with("/v1/tax_sa/zatca/public/INV-00001."),
         "{path}"
     );
+    // The link waits as the print does, and as long as it is asked to.
+    let started = std::time::Instant::now();
     let (status, body, _) = fixture
-        .send(Request::get(path).body(Body::empty()).unwrap())
+        .send(
+            Request::get(format!("{path}?wait=0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["code"], "tax_sa.not_yet_signed", "the link found it");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "`wait=0` answers at once on the link too: {:?}",
+        started.elapsed()
+    );
+    let started = std::time::Instant::now();
     let (status, body, _) = fixture
         .send(
-            Request::get(format!("{path}?format=pdf"))
+            Request::get(format!("{path}?wait=1"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "the link waited for the worker: {:?}",
+        started.elapsed()
+    );
+    let (status, body, _) = fixture
+        .send(
+            Request::get(format!("{path}?format=pdf&wait=0"))
                 .body(Body::empty())
                 .unwrap(),
         )

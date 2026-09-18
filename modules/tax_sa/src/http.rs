@@ -1858,6 +1858,7 @@ async fn document_link(
         ("Host" = String, Header, description = "The business's subdomain — `bassat.erp.com`."),
         ("token" = String, Path, description = "From `POST /v1/tax_sa/zatca/documents/{number}/link`."),
         ("format" = Option<String>, Query, description = "`pdf` for the PDF/A-3 with the XML attached; absent, the page."),
+        ("wait" = Option<u64>, Query, description = "Seconds to wait for the signature or the clearance. Default and most 20; 0 answers at once."),
     ),
     security(),
     responses(
@@ -1873,6 +1874,8 @@ async fn public_print(
     Language(locale): Language,
     axum::extract::Path(token): axum::extract::Path<String>,
     Query(query): Query<PublicQuery>,
+    // The same wait the staff routes take, and the same ceiling on it.
+    Query(waiting): Query<PrintQuery>,
 ) -> Result<axum::response::Response, Problem> {
     use axum::response::IntoResponse as _;
     require_module(&caller.db, &crate::module_id(), locale)?;
@@ -1893,7 +1896,7 @@ async fn public_print(
             .ok_or_else(no_such_link)?;
     drop(conn);
     let number = secret.opens(&token).ok_or_else(no_such_link)?;
-    let (document, deliverable) = handed_over(&caller.db, &number, PRINT_WAIT, locale).await?;
+    let (document, deliverable) = handed_over(&caller.db, &number, waiting.wait(), locale).await?;
     if query.format.as_deref() == Some("pdf") {
         let bytes = rendered_pdf(document, deliverable, locale).await?;
         return Ok(pdf_response(&number, bytes));

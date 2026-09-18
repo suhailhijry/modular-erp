@@ -53901,6 +53901,17 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Seconds to wait for the signature or the clearance. Default and most 20; 0 answers at once.",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {

@@ -786,7 +786,7 @@ environment per process, and not one per call.
 | `GET` | `/v1/tax_sa/zatca/documents/{number}/xml` |
 | `GET` | `/v1/tax_sa/zatca/documents/{number}/pdf` |
 | `POST` | `/v1/tax_sa/zatca/documents/{number}/link` |
-| `GET` | `/v1/tax_sa/zatca/public/{token}` (open, bounded; `?format=pdf`) |
+| `GET` | `/v1/tax_sa/zatca/public/{token}` (open, bounded; `?format=pdf`, `?wait=`) |
 | `GET` `POST` | `/v1/tax_sa/zatca/onboarding` |
 | `PUT` | `/v1/tax_sa/zatca/onboarding/certificate` |
 | `POST` | `/v1/tax_sa/zatca/onboarding/activate` |
@@ -848,6 +848,7 @@ key never leaves the worker.
 `POST …/{number}/link` hands staff a path — the number and an HMAC of it under a
 secret the business keeps, made on the first link asked for — and
 `GET /v1/tax_sa/zatca/public/{token}` opens the same print under the same waiting
+— `?wait=` as the staff routes take it, twenty seconds the default and the most —
 and refusals, with no sign-in, bounded per caller and per business by
 `erp_web::Public` like every open route. The document's own UUID would not do:
 it is a v5 of the VAT number and the number, both printed on the invoice.
