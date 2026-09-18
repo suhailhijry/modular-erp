@@ -278,6 +278,15 @@ drift with every change.
   carries a **revenue account**, and stocked ones an **inventory** and a **cost
   account**, all defaulting to the conventional codes — without it the vertical
   charts' revenue split has nothing posting to it.
+- **The accountant's review is the demo, not a document** (decided
+  2026-09-18). A posting map written out for review was offered on 2026-09-16
+  and declined: once the interface and the API are done, an accountant tries
+  the system end to end and says what is wrong. What that asks of the demo:
+  its seed should exercise **every posting path** — a sale, a credit note, a
+  refund, a supplier bill and its payment, stock in and written off, a payroll
+  run, a package sold and redeemed, a subscription recognised, a till's cash
+  over and short, a year closed — so that the journal shows each kind of entry
+  the modules make and none is reviewed by accident of what got clicked.
 - **Classifications instead of cost centers** (decided 2026-09-18, not yet
   built; researched in §90). DualEntry's model: tenant-defined **types**, each
   a list of **values that nest** — one tree per type, reports rolling up —
@@ -587,6 +596,18 @@ drift with every change.
       journal and the sales reports cut by any of them. §87's cost center
       becomes one type. **With custom fields and allocation templates** (decided
       2026-09-18). ~5–6 weeks after the same fact vocabulary
+- [ ] **Simple automation** (fully decided 2026-09-18, §90). A
+      **trigger, conditions, then one or more actions from a short list** — no
+      loops, and no waits except approval. The rules crate supplies the
+      conditions unchanged; the event log the triggers; the outbox the
+      delivery. After approvals and classifications, which give it the facts
+      and the one wait it has
+- [ ] **Outbound webhooks** (wanted 2026-09-18, §90; details open). A tenant
+      registers an address and the kinds of event it hears; automation uses the
+      same delivery as one of its actions. Signed, retried through the outbox,
+      logged for the tenant. For third-party integration, which is how many
+      businesses in the market connect their systems. **Fully decided; built
+      after automation**
 - [ ] Security polish: rate limits and lockout for signed-in users; API key expiry;
       session idle timeout and a list of active sessions; virus scanning of uploads;
       keys scoped `*:manage_tenant` must not rewrite permission limits; the remaining
@@ -1686,6 +1707,86 @@ code's campaign; nothing. Frozen on the event, explained on request.
 only, that order of arrival, re-tagging by an event in open periods, forward-only
 rules; **custom fields and allocation templates join this item**, and learned
 suggestions wait for TypeSafe's Jev.
+
+#### Automation, the simple version (wanted 2026-09-18)
+
+Asked whether the rules engine could sit under a graph interface as a proper
+automation engine. **For decisions, yes; for automation, not by itself.** A
+condition is already a tree — `all`, `any`, `not`, comparisons — generic over
+its consequence, validated against a registry, serialised, explainable and
+authored four ways, so a visual builder over approvals, classifications,
+limits and pricing is a front end to what exists. What rules lack is
+everything that *does* something: a rule is asked a question by a command and
+hands back a value; nothing fires it, it performs nothing, and it remembers
+nothing.
+
+The rest of the system supplies those parts, so automation is a layer beside
+the rules crate rather than a stretch of it: **triggers** from the event log,
+where every business fact already is one with a position; **conditions** from
+the rules crate, unchanged; **the one wait** from the approval engine;
+**actions** as commands and outbox effects, delivered at least once under
+idempotency keys as everything else is. **The product owner wants the simple
+version only:** a trigger, conditions, then one or more actions from a short
+list — no loops, no waits except approval — *"90% of the job, with very few
+moving parts"*.
+
+**What the laws require of it.** A projection never acts, so automation is a
+reactor over the log with its own checkpoint, and a rebuild never re-fires
+one. An action is a command a person could have sent, through the same gates,
+approvals included; nothing posts to the ledger any other way. An action's
+identity is derived from the automation, the triggering event's position and
+the action's index, so at-least-once delivery performs it once.
+
+**Decided the same day.** **Triggers:** a curated list of business events —
+invoice issued, payment received, booking created, completed, cancelled or
+missed, customer created, supplier bill recorded, stock received or written
+off, a package or subscription about to expire, an approval decided. **No
+schedules in the first build, but a time condition**: *"if the booking ended
+between 11 AM and 2 AM, grant 200 points and send a message"* — the crate's
+`Covers` window, which pricing already uses. **Actions:** a message to the
+customer over any `messaging` channel from a template; a notification to
+named staff; a grant of a promotional code, a coupon or loyalty points;
+nothing that issues a financial document or posts to the ledger; and **an
+outbound webhook, wanted** — see below. **An automation acts under
+its own named identity**, recorded on every event it causes, and nobody can
+save one containing an action they may not perform themselves. **Approval
+rules treat automations as they treat API keys, by a toggle of their own**
+beside the API-key one. **An event an automation caused never triggers an
+automation.** **A daily cap of actions, set by the author when the automation
+is created**; at the cap it pauses and tells its author. **Failures** retry
+through the outbox and dead-letter; **a run log** the tenant reads says what
+fired it, whether its conditions matched and why, what it did and what
+failed. **Managing automations is a new permission** held by the owner and
+manager roles and grantable to others.
+
+#### Outbound webhooks (wanted 2026-09-18)
+
+Proposed as automation's fourth action and recommended for later; **the
+product owner wants it now, and as more than an action**: *"it's not just for
+automation, it's also for third-party integration. Many businesses here
+configure this way."* So it is a platform feature with two users — a tenant's
+**subscription** (this address hears every event of these kinds) and an
+automation's **action** (this address hears when the conditions match) — over
+one delivery path: the outbox, which already retries, backs off, dead-letters
+and carries an idempotency key. Webhooks exist today only inbound
+(`erp_api::hooks`, payment providers); the HMAC the customer's link uses
+(§88) is the signing precedent. Registering an address sends data out of the
+system, so it belongs among the sensitive kinds an approval rule may gate.
+
+**Decided the same day, all as recommended.** Subscription and action share
+the one delivery path. **Events are the curated list** automation triggers
+on; widening it is future work, led by what tenants' integrations need. **The
+message is the full record** as the API presents it, with the event's kind,
+id and time and a version on the format. **Each address has its own secret**,
+shown once and rotatable; every message is signed with it and timestamped
+against replay; HTTPS only, and an address into a private network is refused.
+**Retries back off over three days**, then dead-letter; an address that keeps
+failing is switched off and whoever registered it is told; the tenant has a
+**delivery log and can redeliver by hand**. **Order is not guaranteed**; a
+sequence number lets the receiver sort. **Ten addresses per tenant** to
+start, changeable by platform staff. **Managing them is a new permission held
+by the owner alone**, grantable to others. **Built after automation.** Nothing
+on this item is open.
 
 #### Open decisions, put to the product owner the same day
 
