@@ -24938,7 +24938,7 @@
                 }
               }
             },
-            "description": "Your role here does not permit this."
+            "description": "Not a role that may, without the `hr:approve_timesheet` claim once the tenant uses claims (`hr.not_approved`), or the caller's own hours (`hr.not_your_own_timesheet`)"
           },
           "404": {
             "content": {
@@ -43535,7 +43535,7 @@
                 }
               }
             },
-            "description": "Nothing handed back, a value that did not parse, or a returned line of the wrong shape: a quantity that is not one (`sales.not_a_quantity`), or names that do not agree with the quantity (`sales.named_units`, `inventory.needs_serials`)"
+            "description": "Nothing handed back, a value that did not parse, or a returned line of the wrong shape: a quantity that is not one (`sales.not_a_quantity`), or names that do not agree with the quantity (`sales.named_units`, `inventory.needs_serials`), no such line (`sales.no_such_line`), more than is left to credit (`sales.credit_too_large`), or a sale already credited (`sales.already_credited`)"
           },
           "401": {
             "content": {
@@ -43566,6 +43566,16 @@
               }
             },
             "description": "No such shift"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The sale was cancelled while the return was being made (`sales.already_cancelled`)"
           },
           "413": {
             "content": {
@@ -47730,7 +47740,7 @@
                 }
               }
             },
-            "description": "Your role here does not permit this."
+            "description": "Not a role that may, or without the `purchases:approve_payment` claim once the tenant uses claims (`purchases.not_approved`)"
           },
           "404": {
             "content": {

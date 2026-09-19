@@ -14900,6 +14900,98 @@ async fn permission_limits_are_a_versioned_setting_that_refuses_impossible_rules
     fixture.cleanup().await;
 }
 
+/// **Over HTTP: a member without the approval claim is a 403 at the bill
+/// payment and at the timesheet**, as at the credit note, and the claim's holder
+/// is refused their own hours the same way. Until 2026-09-19 these were a 400
+/// and a 422, from the catch-all arm of each module's mapper.
+#[tokio::test]
+async fn a_missing_approval_claim_is_forbidden_at_the_payment_and_the_timesheet() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let clerk = fixture.user("clerk@acme.test", "hunter2hunter2").await;
+    let boss = fixture.user("boss@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.join_as(clerk, tenant, "clerk").await;
+    fixture.join_as(boss, tenant, "clerk").await;
+    fixture.enable_sales(tenant).await;
+    fixture.enable_module(tenant, purchases::setup()).await;
+    fixture.enable_module(tenant, hr::setup()).await;
+    fixture
+        .hire(tenant, "EMP-BOSS", "boss@acme.test", boss, None)
+        .await;
+    let owner = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let clerk = fixture.token("clerk@acme.test", "hunter2hunter2").await;
+    let boss = fixture.token("boss@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&owner, "acme", "services").await;
+
+    let (status, recorded, _) = fixture
+        .send(posting(
+            &owner,
+            "/v1/purchases/bills",
+            &serde_json::json!({
+                "supplier": { "name": "Najd Supplies", "vat_number": "311234567800003" },
+                "reference": "NS-8891",
+                "billed_on": "2026-02-14T00:00:00Z",
+                "currency": "SAR",
+                "lines": [{ "description": "Subcontracting", "account": "5000",
+                    "net": 40_000, "vat": "standard", "vat_rate": 1500, "tax": 6_000 }]
+            }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{recorded}");
+    let bill = recorded["id"].as_str().expect("an id").to_owned();
+
+    // Granting a claim to anybody is what arms it, per claim.
+    for claim in ["purchases:approve_payment", "hr:approve_timesheet"] {
+        let (status, body) = fixture
+            .as_caller(
+                &owner,
+                "POST",
+                "/v1/hr/employees/EMP-BOSS/claims",
+                Some(serde_json::json!({ "claim": claim })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{claim}: {body}");
+    }
+
+    let payment = serde_json::json!({
+        "reference": "TRF-1",
+        "amount": { "minor": 46_000, "currency": "SAR" },
+        "paid_on": "2026-03-04T00:00:00Z",
+        "account": "1010"
+    });
+    let pay = format!("/v1/purchases/bills/{bill}/payments");
+    let (status, body, _) = fixture.send(posting(&clerk, &pay, &payment)).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("purchases.not_approved")),
+        "{body}"
+    );
+    let (status, body, _) = fixture.send(posting(&owner, &pay, &payment)).await;
+    assert_eq!(status, StatusCode::OK, "the owner is never refused: {body}");
+
+    let day = "/v1/hr/employees/EMP-BOSS/days/2026-03-02";
+    let hours = serde_json::json!({ "minutes": 480 });
+    for (who, code) in [
+        (&clerk, "hr.not_approved"),
+        (&boss, "hr.not_your_own_timesheet"),
+    ] {
+        let (status, body) = fixture
+            .as_caller(who, "PUT", day, Some(hours.clone()))
+            .await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (StatusCode::FORBIDDEN, Some(code)),
+            "{body}"
+        );
+    }
+    let (status, body) = fixture.as_caller(&owner, "PUT", day, Some(hours)).await;
+    assert_eq!(status, StatusCode::OK, "the owner is never refused: {body}");
+
+    fixture.cleanup().await;
+}
+
 /// A request to post `body`, keyed by who sends what.
 fn posting(token: &str, path: &str, body: &serde_json::Value) -> Request<Body> {
     Request::post(path)

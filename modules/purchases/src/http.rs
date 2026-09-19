@@ -359,7 +359,7 @@ async fn record_bill(
         (status = OK, description = "BillPaymentRecorded, or already recorded under this reference.", body = BillPaymentRecorded),
         (status = BAD_REQUEST, description = "A non-positive amount, or an unusable id", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, or without the `purchases:approve_payment` claim once the tenant uses claims (`purchases.not_approved`)", body = Problem),
         (status = NOT_FOUND, body = Problem),
         (status = CONFLICT, description = "More than is outstanding — read the bill again and decide", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "No such bill, or a payment date in a closed period", body = Problem),
@@ -532,6 +532,8 @@ fn purchase_problem(error: &CommandError<PurchaseError>, locale: Locale) -> Prob
     let (status, message) = match error {
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
+                // Who is asking, not what was asked: the approval claim.
+                PurchaseError::NotApproved(_) => StatusCode::FORBIDDEN,
                 // Well-formed, and about something that is not there or not in a
                 // state that allows it. A closed period arrives here too, from
                 // the ledger, and so does a line naming a product nobody
@@ -593,5 +595,16 @@ mod tests {
         let problem = purchase_problem(&refused, Locale::English);
         assert_eq!(problem.status, 422);
         assert_eq!(problem.code, "purchases.no_such_product");
+    }
+
+    /// **Approving a payment without the claim is a 403**, as `sales` answers
+    /// its own claim, not the 400 the catch-all arm would give it.
+    #[test]
+    fn a_missing_approval_claim_refuses_the_caller() {
+        let refused = CommandError::Execute(ExecuteError::Rejected(PurchaseError::NotApproved(
+            "purchases:approve_payment".to_owned(),
+        )));
+        let problem = purchase_problem(&refused, Locale::English);
+        assert_eq!(problem.status, 403);
     }
 }

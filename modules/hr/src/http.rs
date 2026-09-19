@@ -1591,7 +1591,7 @@ async fn timesheet(
         (status = OK, body = HrAccepted),
         (status = BAD_REQUEST, description = "Not a date, or more minutes than a day has", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, without the `hr:approve_timesheet` claim once the tenant uses claims (`hr.not_approved`), or the caller's own hours (`hr.not_your_own_timesheet`)", body = Problem),
         (status = NOT_FOUND, description = "No such employee", body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),
     ),
@@ -1821,6 +1821,9 @@ fn problem_for(error: &CommandError<HrError>, locale: Locale) -> Problem {
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
                 HrError::NoSuchEmployee(_) => StatusCode::NOT_FOUND,
+                // Who is asking, not what was asked: the approval claim, or
+                // signing one's own hours.
+                HrError::NotApproved(_) | HrError::NotYourOwnTimesheet => StatusCode::FORBIDDEN,
                 HrError::Details(_) => StatusCode::BAD_REQUEST,
                 // Well-formed, and refused on the state of the world: no such
                 // manager, a branch that is not open, a line that would loop.
@@ -1848,4 +1851,22 @@ fn problem_for(error: &CommandError<HrError>, locale: Locale) -> Problem {
         }
     };
     Problem::new(status, &message, locale, &CATALOG)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A missing claim, or signing one's own hours, is a 403**, as `sales`
+    /// answers its own claim, not the 422 the catch-all arm would give it.
+    #[test]
+    fn refusals_of_the_caller_are_forbidden() {
+        for refused in [
+            HrError::NotApproved("hr:approve_timesheet".to_owned()),
+            HrError::NotYourOwnTimesheet,
+        ] {
+            let error = CommandError::Execute(ExecuteError::Rejected(refused));
+            assert_eq!(problem_for(&error, Locale::English).status, 403);
+        }
+    }
 }
