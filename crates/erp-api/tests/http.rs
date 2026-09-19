@@ -14977,14 +14977,16 @@ async fn a_missing_approval_claim_is_forbidden_at_the_payment_and_the_timesheet(
         (&clerk, "hr.not_approved"),
         (&boss, "hr.not_your_own_timesheet"),
     ] {
-        let (status, body, _) = fixture.send(posting(who, day, &hours)).await;
+        let (status, body) = fixture
+            .as_caller(who, "PUT", day, Some(hours.clone()))
+            .await;
         assert_eq!(
             (status, body["code"].as_str()),
             (StatusCode::FORBIDDEN, Some(code)),
             "{body}"
         );
     }
-    let (status, body, _) = fixture.send(posting(&owner, day, &hours)).await;
+    let (status, body) = fixture.as_caller(&owner, "PUT", day, Some(hours)).await;
     assert_eq!(status, StatusCode::OK, "the owner is never refused: {body}");
 
     fixture.cleanup().await;
