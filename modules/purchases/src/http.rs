@@ -359,7 +359,7 @@ async fn record_bill(
         (status = OK, description = "BillPaymentRecorded, or already recorded under this reference.", body = BillPaymentRecorded),
         (status = BAD_REQUEST, description = "A non-positive amount, or an unusable id", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, or without the `purchases:approve_payment` claim once the tenant uses claims (`purchases.not_approved`)", body = Problem),
         (status = NOT_FOUND, body = Problem),
         (status = CONFLICT, description = "More than is outstanding — read the bill again and decide", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "No such bill, or a payment date in a closed period", body = Problem),

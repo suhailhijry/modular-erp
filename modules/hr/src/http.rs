@@ -1591,7 +1591,7 @@ async fn timesheet(
         (status = OK, body = HrAccepted),
         (status = BAD_REQUEST, description = "Not a date, or more minutes than a day has", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, without the `hr:approve_timesheet` claim once the tenant uses claims (`hr.not_approved`), or the caller's own hours (`hr.not_your_own_timesheet`)", body = Problem),
         (status = NOT_FOUND, description = "No such employee", body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),
     ),
