@@ -1689,6 +1689,37 @@ fn credit_lines(
         .collect()
 }
 
+/// **The status of a sales refusal, for every door it surfaces from.** The till
+/// asks this too, so one refusal is not two statuses depending on the route.
+#[must_use]
+pub fn rejection_status(rejection: &SalesError) -> StatusCode {
+    match rejection {
+        // Who is asking, not what was asked: a claim, or the document limit.
+        refused if refused.refuses_the_caller() => StatusCode::FORBIDDEN,
+        // The invoice moved on between the client reading it and paying it.
+        // Look again and decide.
+        SalesError::Overpayment { .. } | SalesError::AlreadyCancelled { .. } => {
+            StatusCode::CONFLICT
+        }
+        // Well-formed, and refused on the state of something the request named:
+        // the invoice, the posting accounts, or the customer record. None is a
+        // 404 — the invoice is what was being created, and it is the *body*
+        // that named what is missing or wrong.
+        SalesError::NotIssued(_)
+        | SalesError::Ledger(_)
+        | SalesError::HasPayments(_)
+        | SalesError::NoSuchCustomer(_)
+        | SalesError::DocumentCurrency { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        // **A line of the wrong shape.**
+        refused if refused.is_malformed() => StatusCode::BAD_REQUEST,
+        // **The shelf's own split, not a second one.** A serial that is not
+        // there and a product nobody declared are well-formed requests about a
+        // world that says no; `inventory` already decides which is which.
+        SalesError::Stock(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
 /// Maps a command failure onto a status.
 ///
 /// Same shape as [`ledger::http`]'s, and deliberately still its own function:
@@ -1696,41 +1727,9 @@ fn credit_lines(
 /// is exactly the part a shared helper could not decide.
 fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
     let (status, message) = match error {
-        CommandError::Execute(ExecuteError::Rejected(rejection)) => (
-            match rejection {
-                // Who is asking, not what was asked: a claim, or the document
-                // limit.
-                refused if refused.refuses_the_caller() => StatusCode::FORBIDDEN,
-                // Well-formed, but about something that is not there or not in a
-                // state that allows it.
-
-                // The invoice moved on between the client reading it and paying
-                // it. Look again and decide.
-                SalesError::Overpayment { .. } | SalesError::AlreadyCancelled { .. } => {
-                    StatusCode::CONFLICT
-                }
-                // Well-formed, and refused on the state of something the
-                // request named: the invoice, the posting accounts, or the
-                // customer record. None is a 404 — the invoice is what was
-                // being created, and it is the *body* that named what is
-                // missing or wrong.
-                SalesError::NotIssued(_)
-                | SalesError::Ledger(_)
-                | SalesError::HasPayments(_)
-                | SalesError::NoSuchCustomer(_)
-                | SalesError::DocumentCurrency { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-                // **A line of the wrong shape**, decided in one place the till
-                // asks too, so the two doors cannot answer it differently.
-                refused if refused.is_malformed() => StatusCode::BAD_REQUEST,
-                // **The shelf's own split, not a second one.** A serial that is
-                // not there and a product nobody declared are well-formed
-                // requests about a world that says no; `inventory` already
-                // decides which of its refusals are which.
-                SalesError::Stock(_) => StatusCode::UNPROCESSABLE_ENTITY,
-                _ => StatusCode::BAD_REQUEST,
-            },
-            rejection.message(),
-        ),
+        CommandError::Execute(ExecuteError::Rejected(rejection)) => {
+            (rejection_status(rejection), rejection.message())
+        }
 
         CommandError::Pool(e @ erp_tenant::PoolError::Overloaded { .. }) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.message())

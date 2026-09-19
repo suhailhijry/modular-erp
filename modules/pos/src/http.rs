@@ -559,8 +559,9 @@ async fn ring_sale(
     request_body = NewReturn,
     responses(
         (status = OK, body = PosAccepted),
-        (status = BAD_REQUEST, description = "Nothing handed back, a value that did not parse, or a returned line of the wrong shape: a quantity that is not one (`sales.not_a_quantity`), or names that do not agree with the quantity (`sales.named_units`, `inventory.needs_serials`)", body = Problem),
+        (status = BAD_REQUEST, description = "Nothing handed back, a value that did not parse, or a returned line of the wrong shape: a quantity that is not one (`sales.not_a_quantity`), or names that do not agree with the quantity (`sales.named_units`, `inventory.needs_serials`), no such line (`sales.no_such_line`), more than is left to credit (`sales.credit_too_large`), or a sale already credited (`sales.already_credited`)", body = Problem),
         (status = NOT_FOUND, description = "No such shift", body = Problem),
+        (status = CONFLICT, description = "The sale was cancelled while the return was being made (`sales.already_cancelled`)", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "The till is shut, the sale is not one that can be credited, the tenders do not come to what the lines credit, the ledger refused it, or the shelf refuses the units coming back (`inventory.not_consumed`, `inventory.more_than_was_taken`, `inventory.named_units_come_back_whole`, `inventory.not_out`)", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, description = "Not a role that may, without the `sales:approve_credit_note` claim once the tenant uses claims (`sales.not_approved`), or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
@@ -908,18 +909,14 @@ fn problem_for(error: &CommandError<PosError>, locale: Locale) -> Problem {
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
                 PosError::NoSuchShift(_) => StatusCode::NOT_FOUND,
-                // The till's operator, over the document limit.
-                PosError::Sale(refused) if refused.refuses_the_caller() => StatusCode::FORBIDDEN,
-                // **A line of the wrong shape**, as `/v1/sales` answers it: a
-                // quantity that is not one, names that do not match, a lot with
-                // no product, or a line the shelf cannot read.
-                PosError::Sale(refused) if refused.is_malformed() => StatusCode::BAD_REQUEST,
+                // **As `/v1/sales` answers it**: the caller's claim or limit, a
+                // line of the wrong shape, a credit that is too large.
+                PosError::Sale(refused) => sales::http::rejection_status(refused),
 
                 // Well-formed, and refused on the state of the world.
                 PosError::Closed(_)
                 | PosError::TendersDoNotMatch { .. }
                 | PosError::Ledger(_)
-                | PosError::Sale(_)
                 | PosError::Unbalanced(_) => StatusCode::UNPROCESSABLE_ENTITY,
 
                 _ => StatusCode::BAD_REQUEST,
@@ -990,6 +987,19 @@ mod tests {
         let problem = problem_for(&refused, Locale::English);
         assert_eq!(problem.status, 403);
         assert_eq!(problem.code, "sales.not_approved");
+    }
+
+    /// **A credit too large is a 400 at the till, as at `/v1/sales`**, not the
+    /// 422 every `PosError::Sale` used to get.
+    #[test]
+    fn a_credit_refusal_is_the_status_the_sales_route_gives() {
+        let sar = CurrencyCode::new("SAR").expect("a currency");
+        let refused = CommandError::Execute(ExecuteError::Rejected(PosError::Sale(
+            sales::SalesError::CreditTooLarge {
+                amount: Money::from_minor(1, sar),
+            },
+        )));
+        assert_eq!(problem_for(&refused, Locale::English).status, 400);
     }
 
     /// **A till line carries its product, its quantity and its serials into
