@@ -497,9 +497,11 @@ drift with every change.
 - [ ] **A demo a salesperson can use:** a small hosted environment, staff routes to
       create, reset and convert demo tenants, a clinic booking template, and salon,
       clinic and café seeds with two branches each. 2–3 weeks
-- [ ] **Settle error status codes before the interface depends on them.** `purchases`
+- [x] **Settle error status codes before the interface depends on them.** `purchases`
       and `hr` refusals answer 400 where `sales` answers 403, and credit refusals
-      answer 400 at `/v1/sales` but 422 at the till. 1–2 hours
+      answer 400 at `/v1/sales` but 422 at the till. 1–2 hours. **Done 2026-09-19**
+      (§90): a refusal of the caller is a 403 from every door, and the till reads
+      `sales`' own status decision
 - [ ] **Consent and a privacy notice captured on public booking**, where clinics
       collect health data. A few days
 - [ ] *Dependency outside this repository:* the interface project calling these APIs
@@ -1801,6 +1803,46 @@ of operation and per account; which records carry defaults; re-tagging history
 by an event that never touches amounts, or by reversal as §87 does;
 forward-only rules. And where both sit in the road map — filed under Priority
 5 until told otherwise.
+
+### 90 · A refusal of the caller is a 403, from every door
+
+**Built 2026-09-19**, closing "settle error status codes before the interface
+depends on them". Read against the code first, because half of it was done:
+`SalesError::refuses_the_caller` and `is_malformed` already decided the claim,
+the limit and the malformed line for `sales` and the till alike.
+
+**What was still wrong.** `purchases` answered a missing `approve_payment` claim
+400 and `hr` answered a missing `approve_timesheet` claim and signing one's own
+hours 422 — both the catch-all arm of their mapper, where `sales` says 403. And
+the till sent every other `SalesError` to 422, so `sales.credit_too_large` and
+`sales.no_such_line` were a 400 at `/v1/sales` and a 422 at the till, and
+`sales.already_cancelled` a 409 and a 422.
+
+**What exists now.** `sales::http::rejection_status` is the one place a
+`SalesError` becomes a status; `sales_problem` and the till's `problem_for` both
+read it. `PurchaseError::NotApproved` and `HrError::{NotApproved,
+NotYourOwnTimesheet}` are 403. The three routes' response lists say so, with the
+codes.
+
+**Proven** by a unit test on each mapper, and over HTTP by
+`a_missing_approval_claim_is_forbidden_at_the_payment_and_the_timesheet`: a
+clerk is refused the payment and the timesheet, the claim's holder is refused
+their own hours, and the owner is never refused. Nothing is written before
+either check, so a 403 leaves nothing half done and a retry answers the same.
+
+**The baseline moved with it.** The till return gains a documented 409, and the
+baseline was already behind `main`'s own spec (cost centers, the fiscal calendar,
+periods, the VAT returns: §84–§89 were never accepted), so `just baseline`
+accepted those too — about 1,900 lines of it is not this change.
+
+**Deliberately not changed:** `payments`' `Refused` keeps its documented 400 for
+a payment that never settled, and the booking desk's billing route keeps its 403
+and 409 — each is its own documented contract, not a disagreement about the
+same refusal.
+
+**Found, not fixed:** `HrError::Claims(ClaimError::Database)` reaches the
+catch-all and answers 422 — a database fault reported as a refusal on the state
+of the world. It wants its own arm (L6).
 
 ### 89 · PDF/A-3, the XML attached
 
